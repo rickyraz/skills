@@ -2,6 +2,18 @@
 
 Load this reference when you need React implementation details for View Transitions: commit phase sequencing, pairing, auto-naming, callbacks, gesture clones, resource blocking, animation optimization, lane gates, or known bugs.
 
+## Availability And Version Gate
+
+As of April 2026, React's official docs mark `<ViewTransition />` as available only in the Canary and Experimental channels. Do not assume stable React 19.x exposes `ViewTransition` or `addTransitionType`.
+
+Before applying the internals in this reference to an app, validate:
+
+- `react` and `react-dom` are both Canary, or both Experimental.
+- The package channels match; do not mix stable `react` with Canary `react-dom`, or the reverse.
+- Framework-level APIs such as router view-transition options do not remove the need for compatible React packages when using React's built-in component API.
+
+For stable React apps, use the browser `document.startViewTransition()` API directly or recommend upgrading both React packages to Canary/Experimental if the user wants React's `<ViewTransition />`.
+
 ## File Map
 
 | File | Role |
