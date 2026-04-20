@@ -1,6 +1,6 @@
 # Agent Skills
 
-A collection of agent skills that extend capabilities across frontend development and testing quality.
+A collection of agent skills that extend capabilities across many domains.
 
 ## Frontend
 
