@@ -16,7 +16,7 @@ There are no required scripts; the agent reads `SKILL.md` and follows links to `
 Using the `skills` CLI with the skill name:
 
 ```bash
-npx skills@latest add rickyraz/skills --skill orthogonal-blueprint
+npx skills@latest add https://github.com/rickyraz/skills --skill orthogonal-blueprint
 ```
 
 Alternatively, copy this folder into your editor’s skills directory, for example `~/.cursor/skills/orthogonal-blueprint/` or `.cursor/skills/orthogonal-blueprint/` in a project repo.
