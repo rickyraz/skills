@@ -10,6 +10,12 @@ A collection of agent skills that extend capabilities across many domains.
 npx skills@latest add rickyraz/skills --skill react-view-transitions
 ```
 
+`solidjs-2` — Write, review, debug, and migrate SolidJS 2.0 (beta) code.
+
+```bash
+npx skills@latest add rickyraz/skills --skill solidjs-2
+```
+
 ## Testing
 
 `testing-mock-discipline` — Improve automated testing strategy with a DI-first approach and disciplined mock usage.
