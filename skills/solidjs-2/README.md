@@ -17,5 +17,6 @@ npx skills@latest add rickyraz/skills --skill solidjs-2
 
 ## Official References
 
-- https://docs.solidjs.com/
-- https://github.com/solidjs/solid
+- https://docs.solidjs.com
+- https://github.com/solidjs/solid/discussions/2596
+- https://hackmd.io/@0u1u3zEAQAO0iYWVAStEvw/rkWIwDAaZx
