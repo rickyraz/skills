@@ -16,6 +16,14 @@ npx skills@latest add rickyraz/skills --skill react-view-transitions
 npx skills@latest add rickyraz/skills --skill solidjs-2
 ```
 
+## Backend & data
+
+`constraint-validation-strategy` — Choose between database constraints, pre-validation, error mapping, set-based bulk validation, and transactional state validation.
+
+```bash
+npx skills@latest add rickyraz/skills --skill constraint-validation-strategy
+```
+
 ## Testing
 
 `testing-mock-discipline` — Improve automated testing strategy with a DI-first approach and disciplined mock usage.
