@@ -1,1113 +1,528 @@
-# SolidJS 2.0 dev-mode diagnostics
+# SolidJS 2.0 RC dev-mode diagnostics
 
-Solid 2.0 ships structured development diagnostics for mistakes that would
-otherwise produce stale reads, feedback loops, leaked owners, invalid async
-reads, or broken lifecycle behavior.
+Snapshot baseline: **`solid-js@2.0.0-rc.1`**, `solidjs/solid` branch `next`,
+verified 2026-08-21.
 
-Diagnostics have a severity and, where documented here, a stable code.
+The authoritative current diagnostic union lives in:
 
-* **Errors** throw and stop the current execution path.
-* **Warnings** use `console.warn` and allow execution to continue.
-* Diagnostics are **development-only** and are stripped from production
-  builds.
+`packages/solid-signals/src/core/dev.ts`
 
-When Solid behaves unexpectedly, **read the diagnostic code before guessing**.
-The message usually identifies both the violated runtime rule and the intended
-fix.
+## Important: severity is not identical to "throws"
 
-Do not silence a diagnostic merely to make the console clean. In Solid 2.0,
-these guardrails encode important parts of the reactivity model.
-
----
-
-## Read this first: owner, tracking, and suspension are different concepts
-
-A large percentage of Solid 2.0 diagnostics become obvious once these three
-ideas are kept separate.
-
-### Owned
-
-An **owner** controls lifetime and disposal.
-
-Components and most reactive primitives execute with an owner. Primitives
-created under that owner can be disposed with it.
-
-Being owned does **not** mean that reactive reads are tracked.
-
-For example, the top level of a component body has an owner, but a signal read
-there is not a reactive subscription.
-
-```tsx
-function Counter() {
-  const [count] = createSignal(0);
-
-  // Owned, but not tracked.
-  const captured = count();
-
-  return <div>{captured}</div>;
-}
-```
-
-`captured` is just the value observed during component creation.
-
----
-
-### Tracked
-
-A **tracked scope** records reactive dependencies.
-
-Common tracked reads include:
-
-```tsx
-<div>{count()}</div>
-
-const doubled = createMemo(() => count() * 2);
-
-createEffect(
-  () => count(),
-  value => console.log(value),
-);
-```
-
-In the split `createEffect` form:
+The structured event has:
 
 ```ts
-createEffect(compute, apply);
+type DiagnosticSeverity = "warn" | "error";
+
+type DiagnosticKind =
+  | "strict-read"
+  | "async"
+  | "write"
+  | "lifecycle"
+  | "owner"
+  | "error";
 ```
 
-`compute` is tracked.
+An event with `severity: "error"` does **not** guarantee the runtime throws at
+that line.
 
-`apply` is not.
+Examples:
 
-That distinction is intentional: dependency discovery and side effects are
-separate phases.
+- many user-authorship violations emit severity `error` and throw;
+- `INVARIANT_VIOLATION` logs in normal dev and throws under test mode;
+- `REACTIVITY_HALTED` reports a fatal scheduler state after an uncaught error.
 
----
+Always document the actual behavior of the specific diagnostic.
 
-### Suspendable / async-aware
-
-A scope may also be allowed to participate in Solid's async graph.
-
-A pending async read must occur somewhere the runtime knows how to suspend,
-defer, or propagate readiness from.
-
-Some scopes are deliberately **non-suspendable**, even if they participate in
-other parts of the reactive system.
-
-In particular, do not assume:
-
-```text
-owned === tracked === suspendable
-```
-
-They describe different runtime capabilities.
-
-This distinction explains several diagnostics below.
-
----
-
-## Debugging protocol
-
-When a Solid 2.0 diagnostic appears:
-
-1. **Read the exact code.**
-2. Determine whether it is an **error** or **warning**.
-3. Identify which rule was violated:
-
-   * write inside owned computation,
-   * untracked read,
-   * pending async read,
-   * forbidden lifecycle scope,
-   * missing/disposed owner,
-   * invalid cleanup,
-   * flush-cycle re-entry.
-4. Move the operation to the scope designed for it.
-5. Use escape hatches only when authoring a primitive that intentionally needs
-   lower-level runtime behavior.
-
-Do **not** start by adding `untrack`, `flush`, another signal, or a wider
-`Loading` boundary. Those can hide the actual architectural mistake.
-
----
-
-# Errors — throw in development
-
-## `SIGNAL_WRITE_IN_OWNED_SCOPE`
-
-A signal was written while executing inside a scope where Solid expects
-computation/setup rather than imperative state mutation.
-
-Common sources include:
-
-* component setup,
-* `createMemo`,
-* the compute half of `createEffect`,
-* similar owned reactive computations.
-
-Do not interpret the name as meaning that every owned callback is tracked.
-For example, a component body is owned even though top-level reactive reads
-are not tracked.
-
-### Wrong
+## Current `DiagnosticCode` union
 
 ```ts
-createMemo(() => {
-  setCount(count() + 1);
-  return count();
-});
+type DiagnosticCode =
+  | "STRICT_READ_UNTRACKED"
+  | "PENDING_ASYNC_UNTRACKED_READ"
+  | "PENDING_ASYNC_FORBIDDEN_SCOPE"
+  | "REACTIVE_WRITE_IN_OWNED_SCOPE"
+  | "ACTION_CALLED_IN_OWNED_SCOPE"
+  | "RUN_WITH_DISPOSED_OWNER"
+  | "NO_OWNER_CLEANUP"
+  | "CLEANUP_IN_FORBIDDEN_SCOPE"
+  | "SETTLED_CLEANUP_UNOWNED"
+  | "FLUSH_IN_EFFECT_CALLBACK"
+  | "PRIMITIVE_IN_FORBIDDEN_SCOPE"
+  | "NO_OWNER_EFFECT"
+  | "NO_OWNER_BOUNDARY"
+  | "ASYNC_OUTSIDE_LOADING_BOUNDARY"
+  | "INVALID_REFRESH_TARGET"
+  | "INVALID_AFFECTS_TARGET"
+  | "MISSING_EFFECT_FN"
+  | "SYNC_NODE_RECEIVED_ASYNC"
+  | "REACTIVITY_HALTED"
+  | "INVARIANT_VIOLATION";
 ```
 
-The computation reads `count`, writes `count`, and can create a feedback cycle:
+If a name is not in this union, do not invent it.
 
-```text
-read count
-    ↓
-write count
-    ↓
-invalidate computation
-    ↓
-read count
-    ↓
-...
-```
+# Mental model behind diagnostics
 
-### Fix: derive instead of writing back
+## Owner
+
+Lifecycle/disposal context.
 
 ```ts
-const doubled = createMemo(() => count() * 2);
+getOwner();
 ```
 
-### Fix: mutate from an imperative boundary
+## Observer / tracking
 
-```tsx
-<button onClick={() => setCount(c => c + 1)}>
-  Increment
-</button>
-```
-
-The general rule is:
-
-```text
-reactive computation → derive
-event/action         → mutate
-```
-
-### Escape hatch: `ownedWrite`
-
-A primitive author may occasionally need a signal that can intentionally be
-written from its own owned machinery:
+Dependency-collecting computation.
 
 ```ts
-const [value, setValue] = createSignal(initial, {
-  ownedWrite: true,
-});
+getObserver();
 ```
 
-Treat `ownedWrite: true` as a **library-author escape hatch**, not a normal
-application-state option.
+A component body can have an owner while a top-level read remains untracked.
 
-If adding it merely makes an error disappear, the state flow is probably
-structured incorrectly.
+## Restricted leaf scope
 
----
+`createTrackedEffect` and owner-backed `onSettled` are intentionally leaf-like.
+They cannot host nested reactive primitives or `onCleanup`.
 
-## `PENDING_ASYNC_UNTRACKED_READ`
+## Async readiness
 
-A pending async value was read outside a scope that can track/suspend that
-read.
+A pending async value requires a tracked/readiness-aware consumer. A normal
+untracked stale read and a pending untracked read are different diagnostics.
 
-The important condition is **pending**.
-
-Reading an already-settled value may appear to work, which can make this bug
-look intermittent.
-
-### Wrong
-
-```tsx
-function Profile() {
-  // Component setup is not a tracked JSX read.
-  const name = user().name;
-
-  return <div>{name}</div>;
-}
-```
-
-If `user()` is still pending, the runtime has no tracked consumer to attach
-that pending state to.
-
-### Fix: perform the read at a tracked consumer
-
-```tsx
-function Profile() {
-  return <div>{user().name}</div>;
-}
-```
-
-Or derive it explicitly:
-
-```ts
-const name = createMemo(() => user().name);
-```
-
-Then consume the derived value reactively:
-
-```tsx
-<div>{name()}</div>
-```
-
-### Mental model
-
-Passing an async-derived value through the tree and **reading** it are separate
-events.
-
-The important question is not:
-
-> Where was the request created?
-
-It is:
-
-> Where was the pending value actually read?
-
----
-
-## `CLEANUP_IN_FORBIDDEN_SCOPE`
-
-`onCleanup` was called inside a scope that owns cleanup through its **return
-value**, specifically `createTrackedEffect` or `onSettled`.
-
-### Wrong
-
-```ts
-onSettled(() => {
-  const id = setInterval(tick, 1000);
-
-  onCleanup(() => clearInterval(id));
-});
-```
-
-### Correct
-
-```ts
-onSettled(() => {
-  const id = setInterval(tick, 1000);
-
-  return () => clearInterval(id);
-});
-```
-
-The cleanup belongs directly to the lifecycle operation that created the
-resource:
-
-```text
-setup
-  ↓
-return cleanup
-```
-
-not:
-
-```text
-setup
-  ↓
-register another cleanup mechanism
-```
-
-Use `onCleanup` only in the narrower scopes where reactive cleanup registration
-is actually supported.
-
----
-
-## Nested primitive creation inside a forbidden leaf scope
-
-**Throws in development.**
-
-The supplied reference does not include the literal diagnostic code for this
-condition. **Do not invent one.**
-
-`createTrackedEffect` and `onSettled` behave as leaf execution scopes. Do not
-create signals, memos, effects, or other owned reactive primitives inside
-them.
-
-### Wrong
-
-```ts
-onSettled(() => {
-  const [state, setState] = createSignal(0);
-});
-```
-
-### Correct
-
-Create owned primitives before entering the leaf scope:
-
-```ts
-const [state, setState] = createSignal(0);
-
-onSettled(() => {
-  console.log(state());
-});
-```
-
-Think:
-
-```text
-component/custom primitive
-│
-├─ createSignal
-├─ createMemo
-├─ createEffect
-│
-└─ onSettled       ← leaf
-```
-
-not:
-
-```text
-onSettled
-└─ new reactive graph
-```
-
----
-
-## Invalid cleanup return value
-
-**Throws in development.**
-
-The supplied reference does not include the literal diagnostic code for this
-condition. **Do not invent one.**
-
-Callbacks whose return contract is:
-
-```ts
-void | (() => void)
-```
-
-must return either:
-
-* `undefined`, or
-* a cleanup function.
-
-Returning a number, object, string, Promise, or another unrelated value is
-invalid.
-
-### Wrong
-
-```ts
-onSettled(() => {
-  startSomething();
-
-  return 123;
-});
-```
-
-### Correct
-
-```ts
-onSettled(() => {
-  const resource = startSomething();
-
-  return () => resource.dispose();
-});
-```
-
-### Important: do not apply this rule to `createEffect`'s compute phase
-
-The compute function exists specifically to return the value passed into the
-apply function:
-
-```ts
-createEffect(
-  () => userId(),
-  id => {
-    console.log(id);
-  },
-);
-```
-
-Here `userId()` is a normal computation result, **not a cleanup return**.
-
-The cleanup contract belongs to cleanup-bearing lifecycle/effect callbacks,
-not to every function passed into a reactive primitive.
-
----
-
-## `flush()` inside a forbidden scope
-
-**Throws in development.**
-
-The supplied reference does not include the literal diagnostic code for this
-condition. **Do not invent one.**
-
-Calling `flush()` from inside `createTrackedEffect` or `onSettled` attempts to
-re-enter the scheduler while the current flush is already executing.
-
-Do not do this:
-
-```ts
-onSettled(() => {
-  setSomething(1);
-  flush();
-});
-```
-
-Move the imperative synchronization point outside the forbidden scope.
-
-`flush()` is primarily for places that genuinely need synchronous observation,
-such as:
-
-* tests,
-* imperative DOM interop,
-* narrow framework/library glue.
-
-It should not become ordinary component-control flow.
-
----
-
-## Potential infinite loop
-
-**Throws when the scheduler exceeds 100,000 flush iterations in one tick.**
-
-The supplied reference does not include the literal diagnostic code for this
-condition. **Do not invent one.**
-
-This almost always means the reactive graph contains a cycle such as:
-
-```text
-computation A reads signal X
-        ↓
-A writes signal Y
-        ↓
-computation B reads Y
-        ↓
-B writes X
-        ↓
-A runs again
-```
-
-Do not assume the scheduler itself is broken.
-
-Trace:
-
-1. which write invalidated the computation,
-2. which computation re-ran,
-3. which value it wrote,
-4. whether that write returns to an earlier dependency.
-
-`SIGNAL_WRITE_IN_OWNED_SCOPE` exists partly to prevent the simplest versions of
-this pattern before they become scheduler loops.
-
----
-
-# Warnings — execution continues
+# Diagnostic reference
 
 ## `STRICT_READ_UNTRACKED`
 
-A signal, signal-backed prop, or store property was read outside tracking and
-its current value was captured as plain JavaScript data.
+**Severity:** warn  
+**Typical behavior:** console warning; execution continues.
 
-This frequently happens at the top level of a component body.
-
-### Wrong
+A reactive signal, signal-backed prop, or store property was read directly in
+a strict untracked location such as component setup or effect apply.
 
 ```tsx
-function Counter(props: { count: number }) {
-  const count = props.count;
-
-  return <div>{count}</div>;
+function Bad(props: { count: number }) {
+  const n = props.count;
+  return <span>{n}</span>;
 }
 ```
 
-The read occurred during component setup.
-
-`count` will not become reactive merely because it is later inserted into JSX.
-
-### Correct: defer the read to JSX
+Fix by moving the read into JSX, memo, or effect compute.
 
 ```tsx
-function Counter(props: { count: number }) {
-  return <div>{props.count}</div>;
+function Good(props: { count: number }) {
+  return <span>{props.count}</span>;
 }
 ```
 
-### Correct: derive explicitly
+If the one-time snapshot is intentional:
+
+```ts
+const n = untrack(() => props.count);
+```
+
+## `PENDING_ASYNC_UNTRACKED_READ`
+
+**Severity:** error  
+**Behavior:** emits the diagnostic and throws.
+
+A still-pending async value was read in a strict untracked location.
 
 ```tsx
-function Counter(props: { count: number }) {
-  const label = createMemo(() => `Count: ${props.count}`);
-
-  return <div>{label()}</div>;
+function Bad() {
+  const name = user().name;
+  return <span>{name}</span>;
 }
 ```
 
-### Correct: explicitly request a one-time read
+If `user()` is pending, the runtime has no tracked consumer to attach retry /
+readiness to.
 
-If capturing the current value is intentional:
+Read it in a tracked consumer:
 
 ```tsx
-function Counter(props: { count: number }) {
-  const initialCount = untrack(() => props.count);
-
-  return <div>{initialCount}</div>;
+function Good() {
+  return <span>{user().name}</span>;
 }
 ```
 
-`untrack` should communicate intent:
-
-> I deliberately want a snapshot.
-
-Do not use it merely to suppress this warning.
-
----
-
-## `ASYNC_OUTSIDE_LOADING_BOUNDARY`
-
-An async read occurred without a `Loading` ancestor.
-
-This is a **warning, not a correctness failure**.
-
-During the synchronous body of `render()` / `hydrate()`, Solid can defer
-attaching the root DOM until the uncaught async value settles, then attach the
-result atomically.
-
-Until then, the mount point may:
-
-* remain empty, or
-* preserve existing static/hydrated content.
-
-So this:
-
-```text
-async read
-   ↓
-no Loading
-   ↓
-root waits
-   ↓
-async settles
-   ↓
-root attaches
-```
-
-is valid behavior.
-
-Use a `Loading` boundary when you want:
-
-* explicit fallback UI,
-* progressive mounting,
-* only a subsection of the page to wait.
-
-### Example
-
-```tsx
-<AppShell>
-  <Loading fallback={<ProfileSkeleton />}>
-    <Profile user={user()} />
-  </Loading>
-</AppShell>
-```
-
-Prefer narrow boundaries around the UI that actually consumes the async value.
-
-This warning only applies to the synchronous `render()` / `hydrate()` body.
-Later route transitions execute under their own transition machinery.
-
----
+The runtime message explicitly points to JSX, memo, or effect compute.
 
 ## `PENDING_ASYNC_FORBIDDEN_SCOPE`
 
-An async value was read inside `createTrackedEffect` or `onSettled`.
+**Severity:** warn in the current diagnostic design.  
+**Meaning:** a pending async read is being attempted from a scope such as
+`createTrackedEffect` / `onSettled` that is not meant to suspend normally.
 
-These scopes cannot suspend.
-
-Treat this warning as a **pre-failure signal**: if the value is actually
-pending at runtime, the read cannot be completed normally.
-
-### Wrong shape
-
-```ts
-onSettled(() => {
-  console.log(user());
-});
-```
-
-if `user()` may still be pending.
-
-### Prefer an async-aware reactive path
-
-Use a split `createEffect` when the side effect depends on reactive async data:
+Treat this as a structural warning: move the potentially pending dependency to
+an async-aware tracked compute, usually the compute half of `createEffect`.
 
 ```ts
 createEffect(
   () => user(),
-  user => {
-    console.log(user);
-  },
+  value => {
+    console.log(value);
+  }
 );
 ```
 
-The compute phase participates in reactive dependency tracking, while the apply
-phase receives the resolved/computed value for the side effect.
+## `REACTIVE_WRITE_IN_OWNED_SCOPE`
 
----
+**Severity:** error  
+**Behavior:** emits and throws for guarded writes.
+
+Covers more than signal setters. Current source uses this code for guarded
+reactive state writes and guarded `refresh()` invalidation in ordinary owned
+component/computation scope.
+
+```ts
+createMemo(() => {
+  setCount(count() + 1); // error
+  return count();
+});
+```
+
+Derive instead:
+
+```ts
+const doubled = createMemo(() => count() * 2);
+```
+
+or mutate from an imperative boundary.
+
+`ownedWrite: true` is an advanced opt-in for a primitive whose own internal
+write is intentional.
+
+## `ACTION_CALLED_IN_OWNED_SCOPE`
+
+**Severity:** error  
+**Behavior:** emits and throws.
+
+Calling an `action` synchronously from an ordinary owned
+component/computation scope is invalid.
+
+Call it from an event/imperative scope.
+
+The guard deliberately allows restricted imperative leaf scopes such as
+tracked effects/onSettled.
+
+## `RUN_WITH_DISPOSED_OWNER`
+
+**Severity:** warn.  
+**Meaning:** `runWithOwner` was given an owner that has already been disposed.
+
+Anything newly attached there has no healthy lifecycle. Capture owners only
+when necessary and check `isDisposed(owner)` in late async callbacks.
+
+## `NO_OWNER_CLEANUP`
+
+**Severity:** warn  
+**Behavior:** `onCleanup` has no owner to attach to, so it cannot run later.
+
+Move registration under a live owner.
+
+## `CLEANUP_IN_FORBIDDEN_SCOPE`
+
+**Severity:** error  
+**Behavior:** emits and throws.
+
+`onCleanup` was called from `createTrackedEffect` / owner-backed `onSettled`.
+
+Return cleanup directly from the callback.
+
+```ts
+onSettled(() => {
+  const resource = setup();
+  return () => resource.dispose();
+});
+```
+
+## `SETTLED_CLEANUP_UNOWNED`
+
+**Severity:** error  
+**Behavior:** emits and throws in dev.
+
+An unowned/out-of-band `onSettled` callback returned a cleanup function, but
+there is no owner whose disposal can honor it.
+
+Schedule resource-owning setup from an owned scope or manage its lifecycle
+explicitly.
+
+## `FLUSH_IN_EFFECT_CALLBACK`
+
+**Severity:** warn  
+**Behavior:** `flush()` is a no-op in a normal effect apply callback because
+the flush that runs effects is already active.
+
+Writes from the effect are processed by the running flush continuation.
+
+If an explicit later drain is truly required:
+
+```ts
+queueMicrotask(() => flush());
+```
+
+Do not confuse this with re-entrant `flush()` from `createTrackedEffect` /
+owner-backed `onSettled`: that currently throws a plain Error without this
+diagnostic code.
+
+## `PRIMITIVE_IN_FORBIDDEN_SCOPE`
+
+**Severity:** error  
+**Behavior:** emits and throws.
+
+A nested reactive owner/primitive was created inside the restricted childless
+scope used by `createTrackedEffect` or owner-backed `onSettled`.
+
+Move primitive creation to the parent scope.
 
 ## `NO_OWNER_EFFECT`
 
-An effect was created without a parent owner.
+**Severity:** warn.
 
-Typical causes:
+An effect has no parent lifecycle owner and therefore will not be disposed
+through a normal owner tree.
 
-* module-scope effect creation,
-* creating an effect after its previous owner has already been disposed,
-* invoking primitive setup from unrelated asynchronous code with no owner.
+Module-scope effect creation is a common cause.
 
-### Wrong
+This diagnostic does **not** mean that all module-scope signals/stores are
+invalid.
+
+## `NO_OWNER_BOUNDARY`
+
+**Severity:** warn.
+
+A `Loading` / `Errored`-style boundary was created outside a live reactive
+owner. The boundary has no normal disposal lifecycle.
+
+## `ASYNC_OUTSIDE_LOADING_BOUNDARY`
+
+**Severity:** warn  
+**Behavior:** FYI warning during the initial render/hydrate enforcement window.
+
+An uncaught async read outside `Loading` is legal: the root mount can defer
+until pending work settles.
+
+Add a `Loading` boundary when you want explicit fallback or progressive
+partial mount, not merely to silence this warning.
+
+## `INVALID_REFRESH_TARGET`
+
+**Severity:** error in the public validation path.
+
+`refresh()` was given something that is not a supported refreshable Solid
+target.
+
+Pass the original refreshable accessor/store primitive expected by the API,
+not an already-read value or arbitrary wrapper.
+
+When debugging exact target rules, read the current `refresh` implementation;
+this validation may evolve during RC.
+
+## `INVALID_AFFECTS_TARGET`
+
+**Severity:** error  
+**Behavior:** emits and throws for validated bad shapes.
+
+Valid forms include:
+
+```ts
+affects(sourceAccessor);
+affects(store);
+affects(storeRecord, "key");
+```
+
+Invalid examples include wrapper functions, already-read values, accessor +
+property-key combinations, or treating multiple keys as a path.
+
+## `MISSING_EFFECT_FN`
+
+**Severity:** error  
+**Behavior:** emits and throws.
+
+The single-argument Solid 1.x effect shape is no longer supported.
+
+```ts
+// Invalid
+createEffect(() => count());
+```
+
+Use:
 
 ```ts
 createEffect(
   () => count(),
-  value => console.log(value),
+  value => console.log(value)
 );
 ```
 
-at module scope.
+## `SYNC_NODE_RECEIVED_ASYNC`
 
-Nothing owns the effect, so nothing knows when to dispose it.
+**Severity:** error  
+**Behavior:** emits and throws in dev.
 
-### Correct
+A computation/effect created with `sync: true` returned a Promise or
+AsyncIterable.
 
-Create it under a component/custom primitive owner or an explicit root:
+The option asserts that async handling can be skipped. Remove `sync: true` or
+return a synchronous value.
 
-```ts
-createRoot(() => {
-  createEffect(
-    () => count(),
-    value => console.log(value),
-  );
-});
-```
+## `REACTIVITY_HALTED`
 
-For application code, component/custom-primitive ownership is usually
-preferable to manually creating roots.
+**Severity:** error event / fatal runtime state.
 
-### SSR consequence
+An uncaught error escaped the available error handling and the scheduler halted
+instead of continuing with potentially inconsistent partially-applied state.
 
-Module-level reactive state is especially dangerous under SSR because one
-process-level instance may accidentally be shared across multiple requests.
+After this state, further scheduled updates are ignored and the runtime logs
+that reactivity was halted.
 
----
+Treat it like a crash: fix/contain the original error with the appropriate
+error boundary or effect error handling.
 
-## `NO_OWNER_CLEANUP`
+## `INVARIANT_VIOLATION`
 
-`onCleanup` was called when no active owner exists.
+**Severity:** error event.
 
-The cleanup callback therefore has no lifecycle to attach to and will never
-run.
+This is different from normal user-authorship diagnostics. It represents an
+internal runtime consistency assertion.
 
-### Wrong mental model
+Current source behavior:
 
-```text
-onCleanup(fn)
-=
-global "run this sometime later"
-```
+- normal dev: emit diagnostic + `console.error`;
+- test mode: also throw so the suite/fuzzer fails hard.
 
-### Correct mental model
+If you see this in ordinary app usage on a current RC with a minimal
+reproduction, investigate as a possible framework bug.
 
-```text
-owner
-└─ resource
-   └─ cleanup when that owner disposes/re-runs
-```
+# Important uncoded dev errors
 
-If there is no owner, there is no disposal event to attach the cleanup to.
+Not every dev failure currently has a `DiagnosticCode`.
 
-Move setup and teardown into an owned component/custom primitive, or use an
-appropriate explicit root.
+Do not invent a code for these.
 
----
+## Invalid effect/tracked-effect cleanup return
 
-## `NO_OWNER_BOUNDARY`
-
-A `Loading` or `Errored` boundary was created without a parent owner.
-
-Boundaries participate in the reactive ownership tree and need a lifecycle.
-
-Without an owner they cannot be disposed correctly.
-
-Do not create component/boundary machinery as a process-level singleton.
-
----
-
-## `RUN_WITH_DISPOSED_OWNER`
-
-`runWithOwner` received an owner that has already been disposed.
-
-Anything created inside that callback can no longer be attached to a live
-lifecycle and may leak.
-
-### Common failure shape
-
-```text
-capture owner
-    ↓
-component disposes
-    ↓
-async callback fires later
-    ↓
-runWithOwner(oldOwner, ...)
-```
-
-Before preserving an owner for asynchronous work, verify that the architecture
-actually requires it.
-
-Prefer keeping work inside Solid's normal reactive/transition lifecycle rather
-than manually reviving old ownership contexts.
-
----
-
-# Diagnostic families
-
-When reading a code, first classify the family.
-
-| Family        | What it means                                           |
-| ------------- | ------------------------------------------------------- |
-| `strict-read` | Reactive data was read without dependency tracking      |
-| `async`       | Async readiness was consumed from the wrong place       |
-| `write`       | Reactive state was mutated from a forbidden owned scope |
-| `lifecycle`   | Cleanup/setup rules were violated                       |
-| `owner`       | Something has no live disposal owner                    |
-
-This gives a useful first question:
-
-```text
-What kind of runtime capability am I misusing?
-```
-
-before asking:
-
-```text
-What syntax should I change?
-```
-
----
-
-# Quick reference
-
-| Diagnostic                               | Severity | Meaning                                                         | Default fix                                                        |
-| ---------------------------------------- | -------- | --------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `SIGNAL_WRITE_IN_OWNED_SCOPE`            | error    | Signal write during forbidden owned execution                   | Derive in computations; mutate from events/actions                 |
-| `PENDING_ASYNC_UNTRACKED_READ`           | error    | Pending async value read without a suspendable tracked consumer | Move the read into JSX/memo/async-aware compute                    |
-| `CLEANUP_IN_FORBIDDEN_SCOPE`             | error    | `onCleanup` inside `createTrackedEffect` / `onSettled`          | Return cleanup directly                                            |
-| Nested primitive in forbidden leaf scope | error    | Primitive created inside `createTrackedEffect` / `onSettled`    | Create it in the parent owned scope                                |
-| Invalid cleanup return                   | error    | Cleanup-bearing callback returned a non-function value          | Return `undefined` or cleanup function                             |
-| `flush()` in forbidden scope             | error    | Scheduler flush attempted to re-enter itself                    | Move synchronization outside the scope                             |
-| Potential infinite loop                  | error    | Flush cycle exceeded 100,000 iterations                         | Trace cyclic write → invalidate → write chain                      |
-| `STRICT_READ_UNTRACKED`                  | warn     | Reactive read captured outside tracking                         | Read in JSX/memo/effect compute, or explicit `untrack`             |
-| `ASYNC_OUTSIDE_LOADING_BOUNDARY`         | warn     | Initial async read has no `Loading` ancestor                    | Add narrow `Loading` only if fallback/progressive mount is desired |
-| `PENDING_ASYNC_FORBIDDEN_SCOPE`          | warn     | Potentially pending read in non-suspendable scope               | Move dependency to async-aware `createEffect` compute              |
-| `NO_OWNER_EFFECT`                        | warn     | Effect has no disposal owner                                    | Create under component/custom primitive/`createRoot`               |
-| `NO_OWNER_CLEANUP`                       | warn     | Cleanup has no owner                                            | Register cleanup inside owned lifecycle                            |
-| `NO_OWNER_BOUNDARY`                      | warn     | Boundary has no owner                                           | Create it under a live render/reactive owner                       |
-| `RUN_WITH_DISPOSED_OWNER`                | warn     | Re-entering an owner after disposal                             | Stop retaining/reusing disposed owners                             |
-
-For error conditions whose literal runtime code is not included in this
-reference, preserve the behavioral name above and inspect the actual console
-message/source before assigning a code.
-
-**Never fabricate a diagnostic identifier.**
-
----
-
-# Common diagnosis traps
-
-## Trap 1: treating component setup as tracked
-
-Wrong assumption:
-
-```text
-inside component
-=
-reactive
-```
-
-Correct:
-
-```text
-component setup
-=
-owned
-
-JSX / memo / effect compute
-=
-tracked
-```
-
-A component executes once. Its JSX expressions establish the fine-grained
-reactive reads.
-
----
-
-## Trap 2: treating every warning as something that must be eliminated
-
-`ASYNC_OUTSIDE_LOADING_BOUNDARY` is intentionally only a warning.
-
-A `Loading` boundary is a UX decision when you want fallback/progressive
-mounting, not a universal requirement for correctness.
-
----
-
-## Trap 3: using `untrack()` as a warning suppressor
-
-This:
+Effect apply and tracked-effect callbacks must return either:
 
 ```ts
-untrack(() => value());
+undefined
 ```
 
-means:
-
-> I explicitly want this read not to become a dependency.
-
-It does **not** mean:
-
-> Make Solid stop complaining.
-
----
-
-## Trap 4: using `flush()` until tests pass
-
-Writes are microtask-batched by default.
-
-If a test needs the committed value synchronously, `flush()` may be valid.
-
-If application logic repeatedly needs `flush()` to work, inspect the state
-flow instead.
-
----
-
-## Trap 5: fixing async diagnostics by widening `Loading`
-
-A pending read is attached to the place that **consumes** the async value.
-
-Prefer:
-
-```tsx
-<AppShell>
-  <Sidebar />
-
-  <Loading fallback={<ProfileSkeleton />}>
-    <Profile user={user()} />
-  </Loading>
-</AppShell>
-```
-
-over:
-
-```tsx
-<Loading fallback={<WholeAppSkeleton />}>
-  <App />
-</Loading>
-```
-
-unless the entire application genuinely has one atomic readiness boundary.
-
----
-
-## Trap 6: confusing the two halves of `createEffect`
-
-Remember:
+or:
 
 ```ts
-createEffect(
-  compute, // tracked dependency collection
-  apply,   // side effect, receives result
-);
+() => void
 ```
 
-Do not move side effects into `compute` merely because that makes a dependency
-available.
+Returning another value currently throws a plain Error with a message about an
+invalid cleanup value.
 
-Do not perform pending async accessor reads casually in the untracked apply
-phase either; pass the value through the compute result.
+## Re-entrant `flush()` in `createTrackedEffect` / owner-backed `onSettled`
 
----
+While the queue is already running, calling `flush()` from these callbacks
+throws a plain Error explaining that `flush()` is not re-entrant there.
+
+This is **not** `FLUSH_IN_EFFECT_CALLBACK`; that code belongs to normal effect
+apply and is only a warning/no-op.
+
+## Post-`await` first read of unresolved async inside an async computation
+
+Current async runtime has a dev-only authored error when an unresolved async
+source is first read only after an `await`, because that read cannot establish
+the dependency edge needed to retry when the source settles.
+
+The current thrown message does not use a stable `DiagnosticCode`.
+
+Read async reactive dependencies before the first `await`, or restructure them
+as inputs.
 
 # Programmatic diagnostics
 
-Diagnostics can be consumed programmatically in development through `DEV`.
+The public dev entry exposes `DEV`.
 
 ```ts
 import { DEV } from "solid-js";
 ```
 
-## Live subscription
+`DEV` is undefined/non-meaningful outside the development entry, so code that
+may run in production should guard it.
+
+## Subscribe
 
 ```ts
-const unsubscribe = DEV.diagnostics.subscribe(event => {
+const unsubscribe = DEV?.diagnostics.subscribe(event => {
   console.log(
-    `[${event.severity}] ${event.code}: ${event.message}`,
+    `[${event.severity}] ${event.code}: ${event.message}`
   );
 });
-
-// later
-unsubscribe();
 ```
 
-Useful for:
-
-* custom devtools,
-* debugging overlays,
-* logging adapters,
-* framework integration tests.
-
----
-
-## Scoped capture
-
-Tests can capture diagnostics generated by a specific operation:
+## Capture
 
 ```ts
-const capture = DEV.diagnostics.capture();
+const capture = DEV?.diagnostics.capture();
 
 // code under test
 
-const events = capture.stop();
+const events = capture?.stop() ?? [];
 ```
 
-Then assert on stable diagnostic properties rather than matching arbitrary
-console text.
+A capture also exposes `events` while active and `clear()`.
 
-For example:
-
-```ts
-const event = events.find(
-  event => event.code === "STRICT_READ_UNTRACKED",
-);
-
-expect(event?.severity).toBe("warn");
-```
-
----
-
-## Diagnostic event shape
-
-Events expose:
+## Event shape
 
 ```ts
-{
-  code,
-  kind,
-  severity,
-  message,
-  ownerId?,
-  ownerName?,
-  nodeName?,
+interface DiagnosticEvent {
+  sequence: number;
+  code: DiagnosticCode;
+  kind: DiagnosticKind;
+  severity: "warn" | "error";
+  message: string;
+  ownerId?: string;
+  ownerName?: string;
+  nodeName?: string;
+  data?: Record<string, unknown>;
 }
 ```
 
-`kind` is one of:
+Use structured `code`, `kind`, and owner/node metadata in tests and tooling.
+Do not assert long human message strings unless the wording itself is the
+contract you are testing.
 
-```ts
-"strict-read"
-| "async"
-| "write"
-| "lifecycle"
-| "owner"
-```
-
-When owner/node metadata is available, prefer it over guessing which component
-caused the diagnostic.
-
-A useful debugging formatter is:
-
-```ts
-DEV.diagnostics.subscribe(event => {
-  const location = [
-    event.ownerName && `owner=${event.ownerName}`,
-    event.nodeName && `node=${event.nodeName}`,
-  ]
-    .filter(Boolean)
-    .join(" ");
-
-  console.warn(
-    `[Solid:${event.code}] ${event.message}` +
-      (location ? ` (${location})` : ""),
-  );
-});
-```
-
----
-
-# Decision tree
-
-When you see a diagnostic:
+# Debugging decision tree
 
 ```text
-Is it about a WRITE?
+Have an exact diagnostic code?
 │
-├─ yes → Is the write inside component/memo/effect compute?
-│        └─ Move mutation to event/action or derive instead.
+├─ yes
+│  ├─ strict-read
+│  │  └─ move reactive read into tracked JSX/memo/effect compute,
+│  │     or use explicit untrack for an intentional snapshot
+│  │
+│  ├─ write
+│  │  └─ move mutation/action/invalidation to an imperative phase
+│  │
+│  ├─ async
+│  │  └─ identify the actual pending source and the consumer/boundary
+│  │
+│  ├─ lifecycle / owner
+│  │  └─ answer "who owns and disposes this?"
+│  │
+│  └─ error
+│     └─ determine whether this is a fatal halt or internal invariant
 │
 └─ no
-   │
-   Is it about a READ?
-   │
-   ├─ STRICT_READ_UNTRACKED
-   │   └─ Move read into JSX/memo/effect compute,
-   │      or explicit untrack if snapshot is intentional.
-   │
-   └─ async/pending
-       │
-       Is the scope allowed to suspend?
-       │
-       ├─ no → move dependency into async-aware reactive compute.
-       │
-       └─ yes
-           │
-           Need fallback/progressive mount?
-           ├─ yes → add a narrow Loading boundary.
-           └─ no  → uncaught initial root readiness may be acceptable.
+   └─ do not invent a name; use the actual thrown message and inspect source
 ```
 
-For lifecycle diagnostics:
+# Source-of-truth rule
 
-```text
-Did this code allocate a resource?
-│
-├─ onSettled / tracked-effect
-│   └─ return cleanup directly
-│
-└─ custom reactive computation
-    └─ use the cleanup mechanism supported by that scope
-```
+When this reference and the current repo disagree, trust
+`packages/solid-signals/src/core/dev.ts` and the call site that emits the
+diagnostic.
 
-For owner diagnostics:
-
-```text
-Who disposes this?
-│
-├─ component/custom primitive/root → good
-└─ nobody → ownership bug
-```
-
----
-
-# Rule of thumb
-
-Solid 2.0 diagnostics are usually telling you that an operation happened at
-the wrong **phase**, not merely that the syntax is wrong.
-
-Keep these roles separate:
-
-```text
-setup owns
-tracked computation derives
-JSX consumes
-Loading expresses initial readiness
-effect apply performs side effects
-event/action mutates
-cleanup disposes
-```
-
-When a diagnostic fires, move the operation to the phase that owns that
-responsibility instead of disabling the guardrail.
+The union is intentionally machine-readable. Re-check it whenever the RC
+version changes.
