@@ -1,6 +1,6 @@
 # solidjs-2
 
-SolidJS 2.0 (beta): async-first reactivity, split effects, stores, actions, JSX, TypeScript, debugging, and Solid 1.x migrations.
+SolidJS 2.0 (rc): async-first reactivity, split effects, stores, actions, JSX, TypeScript, debugging, and Solid 1.x migrations.
 
 ## Repository Layout
 
