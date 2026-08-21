@@ -1,567 +1,847 @@
-# SolidJS 2.0 API cheatsheet
+# SolidJS 2.0 RC API cheatsheet
 
-Detailed behavior reference. Read the section you need; this file is meant to
-be consulted per-topic, not read start to finish.
+Snapshot baseline: **`solid-js@2.0.0-rc.1`**, `solidjs/solid` branch `next`,
+verified 2026-08-21.
 
-**Contents:** [Imports & TypeScript](#imports-and-typescript-config) ·
-[Reactivity core](#reactivity-core) · [Lifecycle](#lifecycle) ·
-[Async data](#async-data) · [Actions & optimistic](#actions-and-optimistic-updates) ·
-[Stores](#stores) · [Control flow](#control-flow) · [DOM](#dom) ·
-[Context](#context)
+This is a condensed agent reference, not a replacement for current upstream
+source.
 
-## Imports and TypeScript config
-
-The DOM runtime, store helpers, and JSX types moved:
+## Imports and package layout
 
 ```ts
-// Web/DOM runtime
-import { render, hydrate } from "@solidjs/web"; // was solid-js/web
+import {
+  createSignal,
+  createMemo,
+  createEffect,
+  createRenderEffect,
+  createTrackedEffect,
+  createRoot,
+  createStore,
+  createProjection,
+  createOptimistic,
+  createOptimisticStore,
+  action,
+  affects,
+  refresh,
+  isPending,
+  latest,
+  resolve,
+  deep,
+  snapshot,
+  reconcile,
+  merge,
+  omit,
+  storePath,
+  untrack,
+  flush,
+  onCleanup,
+  onSettled,
+  createContext,
+  useContext,
+  For,
+  Show,
+  Switch,
+  Match,
+  Repeat,
+  Loading,
+  Errored,
+  Reveal,
+  children,
+  lazy,
+  DEV
+} from "solid-js";
 
-// Stores - now exported from core, not a subpath
-import { createStore, reconcile, snapshot, storePath } from "solid-js"; // was solid-js/store
-
-// Hyperscript / tagged-template renderers, if used
-import h from "@solidjs/h"; // was solid-js/h
-import html from "@solidjs/html"; // was solid-js/html
-import { createRenderer } from "@solidjs/universal"; // was solid-js/universal
+import {
+  render,
+  hydrate,
+  Portal,
+  dynamic,
+  Dynamic
+} from "@solidjs/web";
 ```
 
-`solid-js` no longer exports a JSX namespace or `jsx-runtime` - the core
-package owns renderer-neutral component types, and renderer packages own JSX
-types. Update `tsconfig.json` for web apps:
+For web projects:
 
 ```json
 {
   "compilerOptions": {
-    "jsx": "preserve",
     "jsxImportSource": "@solidjs/web"
   }
 }
 ```
 
-Anywhere you imported `JSX` or `ComponentProps` from `solid-js`, import from
-`@solidjs/web` instead. For renderer-neutral component prop types, use
-`Element` from `solid-js` rather than `JSX.Element`:
+Renderer packages own JSX types. Old entry points such as `solid-js/web` and
+`solid-js/store` are not the 2.0 package layout.
 
-```ts
-import type { Component, Element } from "solid-js";
-type Layout = Component<{ children?: Element }>;
-```
+## Signals and memos
 
-## Reactivity core
-
-### Signals
-
-`createSignal(value)` is unchanged for the plain case. New: `createSignal(fn)`
-creates a **writable derived signal** - it starts as whatever `fn()` computes,
-but `setValue` can override it (think "writable memo"):
+### Plain signal
 
 ```ts
 const [count, setCount] = createSignal(0);
-const [label, setLabel] = createSignal(() => `Count: ${count()}`);
+
+count();
+setCount(1);
+setCount(c => c + 1);
 ```
 
-### Batching and flush
-
-Every write is batched on a microtask automatically - there is no `batch()`
-to call. A read immediately after a write in the same synchronous block still
-returns the pre-write value:
+Writes are queued.
 
 ```ts
-const [a, setA] = createSignal(1);
-setA(2);
-a(); // still 1 here
-flush(); // apply queued writes synchronously
-a(); // now 2
+setCount(1);
+count(); // previous committed value
+
+flush();
+count(); // 1
 ```
 
-Use `flush()` only when you need a synchronous "settled now" point - tests,
-or interop with imperative DOM code (e.g. focusing an element right after a
-state change). Don't sprinkle it into component logic defensively.
-
-### `createEffect` - split into compute and apply
+### Readonly derived value
 
 ```ts
-createEffect(
-  computeFn, // tracked: read the things you depend on, return a value
-  applyFn?, // untracked: receives (value, prevValue), may return cleanup
-  options?
-);
+const doubled = createMemo(() => count() * 2);
 ```
 
+### Writable derived value
+
+Function-form `createSignal` is a writable memo-like primitive.
+
 ```ts
-// Before (1.x): a single function did tracking and side effects together.
-// After (2.0): tracking and side effects are two explicit functions.
-createEffect(
-  () => title(),
-  (value) => {
-    document.title = value;
-  }
-);
+const [selected, setSelected] = createSignal(() => props.initial);
 ```
 
-There's no `initialValue` argument anymore. `compute` receives `prev` (the
-value it returned last time; `undefined` on the first run) as its argument -
-give it a default parameter if you need one:
+Useful signal/memo options include:
 
 ```ts
-createEffect(
-  (prev = 0) => count(),
-  (value, prev) => console.log(`went from ${prev} to ${value}`)
-);
-```
+createSignal(0, {
+  equals: (a, b) => a === b,
+  ownedWrite: true,
+  unobserved: () => cleanupExternalThing()
+});
 
-Cleanup lives on the apply side, returned as a function:
-
-```ts
-createEffect(
-  () => channel(),
-  (name) => {
-    const socket = connect(name);
-    return () => socket.close();
-  }
-);
-```
-
-`EffectBundle` form for structured error handling - pass an object instead of
-a bare `apply` function:
-
-```ts
-createEffect(() => riskyRead(), {
-  effect: (value) => handleSuccess(value),
-  error: (err) => handleFailure(err),
+createMemo(expensive, {
+  lazy: true,
+  equals: false
 });
 ```
 
-`createMemo`'s second argument is now `options`, not an initial value:
+`ownedWrite` is advanced. Do not add it just to silence
+`REACTIVE_WRITE_IN_OWNED_SCOPE`.
+
+### `loadingValue`
+
+A memo can declare a committed provisional first value:
 
 ```ts
-const doubled = createMemo(() => count() * 2); // no initialValue arg
-const lazyOne = createMemo(() => expensive(), { lazy: true }); // deferred first run, auto-disposes at zero subscribers
-```
-
-### `on` is gone - split effects replace it
-
-The compute half of a split effect already *is* the explicit dependency
-declaration, so there's nothing left for `on` to do:
-
-```ts
-// Multiple explicit deps: just read them in compute.
-createEffect(
-  () => [a(), b()] as const,
-  ([a, b]) => console.log(a, b)
+const feed = createMemo(
+  () => fetchFeed(id()),
+  {
+    loadingValue: {
+      provisional: true,
+      items: placeholderItems
+    }
+  }
 );
-
-// `defer` (skip the initial run) is now a plain option.
-createEffect(() => count(), (v) => console.log(v), { defer: true });
 ```
 
-### `createComputed` is gone - pick the right replacement
+During the first flight:
 
-`createComputed` used to cover three different jobs; each has a direct 2.0
-replacement, and they are not interchangeable:
+- readers get `loadingValue`;
+- they do not suspend to `Loading`;
+- `isPending(feed)` stays false.
 
-| What the old code was doing              | Use instead                                    |
-| ------------------------------------------ | ------------------------------------------------ |
-| Pure derivation, no side effect            | `createMemo(() => ...)`                          |
-| Side effect on change (logging, storage)   | split `createEffect(compute, apply)`             |
-| Derived value that also needs a setter     | `createSignal(fn)`                                |
+Use structural `Loading` instead when the placeholder is not honestly a value
+of the same domain/type.
 
-### Errors
+## Ownership and tracking
 
-`onError` / `catchError` are gone. Component-level error UI uses `Errored`;
-programmatic handling inside an effect uses the `error` option on
-`createEffect` (see `EffectBundle` above).
+Low-level helpers expose the distinction:
+
+```ts
+getOwner();    // lifecycle/disposal owner
+getObserver(); // active tracking observer, or null
+```
+
+A component body can be owned while a top-level read is untracked.
 
 ```tsx
-<Errored fallback={(err, reset) => (
-  <div>
-    <p>{String(err)}</p>
-    <button onClick={reset}>Try again</button>
-  </div>
-)}>
-  <Widget />
-</Errored>
+function Bad(props: { count: number }) {
+  const n = props.count; // dev warning
+  return <span>{n}</span>;
+}
+
+function Good(props: { count: number }) {
+  return <span>{props.count}</span>;
+}
 ```
 
-`fallback` here is a **render callback**, not a component - it's invoked
-directly with `(err, reset)` positional arguments by `Errored`, so it can't
-be mounted as `<Fallback />`. Name it camelCase if you extract it, to signal
-"callback" rather than "component". The same applies to the function-child
-forms of `Show`, `For`, `Switch`/`Match`, and `Repeat`.
+Use `untrack` only when a snapshot is intentional.
+
+```ts
+const initial = untrack(() => props.count);
+```
+
+## Effects
+
+### `createEffect(compute, apply)`
+
+Two phases:
+
+```ts
+createEffect(
+  () => count(),
+  (value, prev) => {
+    console.log(value, prev);
+    return () => cleanup();
+  }
+);
+```
+
+- compute is tracked;
+- apply is untracked and side-effecting;
+- apply is writable;
+- apply may return a cleanup function.
+
+One-argument `createEffect(compute)` is invalid in dev and emits
+`MISSING_EFFECT_FN`.
+
+### Error bundle
+
+```ts
+createEffect(
+  () => fetchData(id()),
+  {
+    effect: data => {
+      renderData(data);
+    },
+    error: (err, cleanup) => {
+      console.error(err);
+      cleanup();
+    }
+  }
+);
+```
+
+The `error` arm handles compute/upstream errors. Throws from imperative effect
+code escalate normally rather than being fed back into the same bundle.
+
+### Store data in effects
+
+Bad:
+
+```ts
+createEffect(
+  () => store.user,
+  user => {
+    // store proxy properties are read in untracked apply phase
+    send(user.name, user.age);
+  }
+);
+```
+
+Good:
+
+```ts
+createEffect(
+  () => ({
+    name: store.user.name,
+    age: store.user.age
+  }),
+  user => send(user.name, user.age)
+);
+```
+
+Deep observation:
+
+```ts
+createEffect(
+  () => deep(store),
+  plainSnapshot => persist(plainSnapshot)
+);
+```
+
+Non-tracking plain snapshot:
+
+```ts
+const plain = snapshot(store);
+```
+
+### `createRenderEffect`
+
+Same split idea, but render-phase/synchronous. Prefer normal `createEffect`
+for application side effects unless render-phase semantics are required.
+
+### `createTrackedEffect`
+
+Special single-callback tracked leaf effect.
+
+It is not the default effect form. Its callback is a restricted leaf owner:
+
+- no nested reactive primitive creation;
+- no `onCleanup`;
+- return cleanup directly;
+- a pending async read is not a normal suspendable use case.
+
+## Batching and `flush`
+
+`batch()` is removed. Updates batch by microtask.
+
+```ts
+setOpen(true);
+flush();
+dialog.focus();
+```
+
+`flush(fn)` is also supported for an imperative synchronous drain scope.
+
+Do not use it as ordinary control flow.
+
+Inside a normal effect apply callback, `flush()` is a no-op in dev and emits
+`FLUSH_IN_EFFECT_CALLBACK`.
+
+Inside `createTrackedEffect` / owner-backed `onSettled` while the queue is
+running, re-entrant `flush()` throws; that throw currently has no stable
+diagnostic code in the RC source.
 
 ## Lifecycle
 
-`onMount` is gone. `onSettled` is the closest replacement, and it can return
-a cleanup function - covering the common "run once after the first
-settle, tear down on dispose" pair that used to be `onMount` + `onCleanup`:
+### `onSettled`
+
+Canonical component-level setup + teardown:
 
 ```ts
 onSettled(() => {
   const observer = new ResizeObserver(measure);
   observer.observe(el);
+
   return () => observer.disconnect();
 });
 ```
 
-`onCleanup` still exists but is now a narrower, advanced primitive: reactive
-cleanup tied to a computation's re-run, used when authoring custom reactive
-primitives. For ordinary component/custom-hook setup-and-teardown, use
-`onSettled` with a returned cleanup, not `onCleanup` directly. `onCleanup`
-cannot be called from inside `onSettled` or `createTrackedEffect` - both of
-those manage cleanup exclusively through their return value, and doing so
-throws in dev (`CLEANUP_IN_FORBIDDEN_SCOPE`).
+An owner-backed `onSettled` is implemented through a restricted leaf tracked
+effect. Return cleanup; do not call `onCleanup` inside it.
+
+An unowned/out-of-band `onSettled` can schedule work, but if its callback
+returns cleanup there is no owner to attach it to and dev throws
+`SETTLED_CLEANUP_UNOWNED`.
+
+### `onCleanup`
+
+Low-level lifecycle registration, mainly useful for custom primitive/library
+internals.
+
+```ts
+const owner = getOwner();
+
+runWithOwner(owner, () => {
+  onCleanup(() => resource.dispose());
+});
+```
+
+Dev behavior:
+
+- no owner -> `NO_OWNER_CLEANUP` warning;
+- restricted leaf scope -> `CLEANUP_IN_FORBIDDEN_SCOPE` error.
 
 ## Async data
 
-There's no `createResource`. Any computation can return a Promise or async
-iterable, and consumers just read the accessor as usual:
+Async belongs to normal computations.
 
 ```ts
-// Before: const [user] = createResource(userId, fetchUser);
-const user = createMemo(() => fetchUser(userId()));
+const user = createMemo(() => fetchUser(id()));
 ```
 
-Wrap the part of the tree that reads a not-yet-ready value in `Loading`:
+### `Loading`
 
 ```tsx
-<Loading fallback={<Spinner />}>
+<Loading fallback={<ProfileSkeleton />}>
   <Profile user={user()} />
 </Loading>
 ```
 
-`Loading` covers **initial** readiness for its subtree. Once that subtree has
-rendered once, further revalidation keeps the old content on screen instead
-of tearing back down to the fallback - use `isPending` for "refreshing…" UI
-on top of stable content:
+`Loading` is a branch-readiness boundary.
+
+Initial unresolved reads can show fallback. Once content has rendered,
+ordinary revalidation keeps stale content visible.
+
+Use `on` to re-arm fallback for a key change:
 
 ```tsx
-const refreshing = () => isPending(() => user());
-
-<Loading fallback={<Spinner />}>
-  <Show when={refreshing()}><RefreshBadge /></Show>
-  <Profile user={user()} />
-</Loading>;
-```
-
-`isPending(fn)` actually performs the read inside `fn` - place it under the
-`Loading` boundary that owns that data, not off on its own reading only
-upstream state (which can't tell you a *lower* subtree is pending):
-
-```ts
-isPending(id); // wrong if id itself is never async - always false
-isPending(() => user()); // right - reads the async value directly
-```
-
-`Loading`'s `on` prop controls when the boundary re-shows its fallback during
-revalidation instead of holding stale content - useful for route/key-level
-transitions:
-
-```tsx
-<Loading on={id()} fallback={<Spinner />}>
+<Loading on={id()} fallback={<ProfileSkeleton />}>
   <Profile user={user()} />
 </Loading>
 ```
 
-Other async helpers:
+Nested boundaries are useful for progressive readiness.
 
-- **`latest(fn)`** - peek at the in-flight value of a signal/computation
-  during a transition, falling back to the stale value if the next one
-  isn't ready yet. Useful for keeping a route param or input display in sync
-  with what's actually loading.
-- **`resolve(fn)`** - returns a Promise that resolves once `fn()` settles to
-  a non-pending value. Can't be called from inside a reactive scope. Mainly
-  for tests and imperative glue: `const value = await resolve(() => data());`.
-- **`refresh(target)`** - explicitly invalidates/recomputes a derived source
-  (a signal/store/projection created with a function form). Call it from
-  event handlers, effects, or actions - not from pure computations. A bare
-  `refresh()` that re-asks the same question is intentionally "quiet"
-  (`isPending` stays `false`) unless paired with `affects()`.
-- **`affects(target, key?)`** - declares that in-flight work will change
-  `target`, so `target` (and anything derived from it) reads as pending from
-  the declaration until the transaction settles or reverts, even though the
-  actual change hasn't landed in the graph yet. `affects(store)` marks the
-  whole store; `affects(record, "key")` marks one slot; `affects(accessor)`
-  marks a signal/memo. Pair with `refresh()` when a reload should visibly
-  read as pending rather than silently updating.
+### No `Loading` boundary
 
-`Loading`/`Errored`/async reads compose with SSR: an uncaught pending read in
-a render effect defers the root mount until it settles rather than throwing
-(`ASYNC_OUTSIDE_LOADING_BOUNDARY`, a warning, not an error) - explicit
-`Loading` boundaries are for when you want fallback UI or partial progressive
-mount, not a requirement for correctness.
+During the initial browser `render()` / `hydrate()` enforcement window, an
+uncaught async read is legal: the root mount can be deferred until pending work
+settles. Dev reports `ASYNC_OUTSIDE_LOADING_BOUNDARY` as an FYI warning.
 
-## Actions and optimistic updates
+Use a boundary when you want explicit fallback or partial progressive mount.
 
-`action()` wraps a generator (or async generator) mutation. Inside it you can
-do optimistic writes, `yield` async work, and call `refresh()`:
+### `isPending`
+
+```tsx
+<Loading fallback={<Spinner />}>
+  <Show when={isPending(() => user())}>
+    Updating…
+  </Show>
+  <UserDetails user={user()} />
+</Loading>
+```
+
+`isPending(fn)` performs the read in `fn`.
+
+This is meaningful:
 
 ```ts
-const [todos, setOptimisticTodos] = createOptimisticStore(
-  () => api.listTodos(),
-  []
-);
+isPending(() => user());
+```
 
-const addTodo = action(function* (text: string) {
-  setOptimisticTodos((list) => {
-    list.push({ id: crypto.randomUUID(), text, done: false });
+This cannot infer a lower subtree's pending async merely because `id` caused it:
+
+```ts
+isPending(id);
+```
+
+### `latest`
+
+Reads the in-flight view during a transition when available.
+
+```ts
+const visibleId = () => latest(id);
+```
+
+### `resolve`
+
+Imperative/test helper that waits until an expression has a settled value.
+
+```ts
+const userValue = await resolve(() => user());
+```
+
+Do not call `resolve` from a reactive computation.
+
+### `refresh`
+
+```ts
+refresh(user);
+```
+
+A bare refresh is a quiet re-ask of the same question. The old value remains
+valid while the fresh answer arrives, so `isPending` need not turn true.
+
+### `affects`
+
+Declare data that in-flight work will change:
+
+```ts
+affects(user);
+refresh(user);
+```
+
+Store forms:
+
+```ts
+affects(store);
+affects(store.user, "name");
+```
+
+Do not pass wrapper functions or already-read values; invalid targets emit
+`INVALID_AFFECTS_TARGET`.
+
+## Actions and optimistic state
+
+Use actions for writes that span async work.
+
+```ts
+const save = action(async function* (todo: Todo) {
+  setOptimistic(s => {
+    s.status = "saving";
   });
-  yield api.createTodo(text);
-  refresh(todos);
+
+  const result = await api.save(todo);
+
+  yield; // transaction-aware resumption before later writes
+
+  setOptimistic(s => {
+    s.status = "saved";
+  });
+
+  return result;
 });
 ```
 
-Each `yield` is a network round trip - a bulk operation should call a bulk
-endpoint and `yield` once, not loop `yield` per item.
+Calling an action from an ordinary owned computation/component scope emits
+`ACTION_CALLED_IN_OWNED_SCOPE`.
 
-- **`createOptimistic(value)`** - same surface as `createSignal`, but writes
-  are optimistic: they show immediately and revert automatically when the
-  surrounding transition completes (whether it commits or fails).
-- **`createOptimisticStore(fnOrValue, seed, options?)`** - the store version.
-  `fnOrValue` is typically a function returning the server-authoritative
-  data; mutate it optimistically inside actions, then `refresh()` after the
-  write lands. `options.key` defaults to `"id"` for reconciliation - only
-  pass it when your data uses a different identity field, not to restate the
-  default.
-- **`refresh(target)`** - see above; the reconciliation step after a write.
-- **`affects(target, key?)`** - see above; use when a mutation changes data
-  that isn't directly reflected by an optimistic write (e.g. a server-set
-  `updatedAt` timestamp), so the UI reads as pending on that slot too.
+A plain `await` does not by itself re-enter the action transaction for later
+writes. Use `yield` as the transaction-safe suspension/resumption point.
 
-Design mutations as one derived source with layered concerns, not several
-parallel stores you manually keep in sync - see `references/anti-patterns.md`
-finding on "one store, not three."
+Do not call `flush()` inside an action body.
+
+### Optimistic signal
+
+```ts
+const [name, setName] = createOptimistic("Alice");
+```
+
+### Optimistic store
+
+```ts
+const [todos, setTodos] = createOptimisticStore(
+  () => api.list(),
+  []
+);
+```
+
+Optimistic state represents the value you can already predict. `affects`
+represents a value you know will change but cannot yet provide.
 
 ## Stores
 
-### Draft-first setters (mutation is the default now)
-
-Store setters receive a mutable draft - the equivalent of 1.x's `produce`
-wrapper is now just how setters behave, so nothing needs wrapping:
+### Draft-first setter
 
 ```ts
-const [state, setState] = createStore({ user: { name: "" }, items: [] as string[] });
+const [store, setStore] = createStore({
+  user: { name: "A" },
+  list: [] as string[]
+});
 
-setState((draft) => {
-  draft.user.name = "Alice";
-  draft.items.push("first item");
+setStore(s => {
+  s.user.name = "B";
+  s.list.push("x");
 });
 ```
 
-A setter can also **return** a value for shallow replacement instead of
-mutating: arrays are replaced index-by-index with length adjusted (so
-surviving object references keep their identity), objects get a top-level
-shallow diff. This is most useful for filtering:
+### Returning a replacement
 
 ```ts
-setState((draft) => ({ ...draft, items: [] })); // full replace
-setItems((list) => list.filter((item) => item.id !== targetId)); // remove
+setStore(s => ({
+  ...s,
+  list: []
+}));
 ```
 
-This return-path replacement is **not** keyed reconciliation - that only
-applies to the *projection function* form (`createStore(fn, seed, { key })`,
-`createOptimisticStore`, `createProjection`), where the function's return
-value is diffed against the previous draft by `options.key`. Don't conflate
-the two: a plain setter returning a filtered array works because of
-positional index-replacement on same-reference survivors, not because of
-keying.
+For arrays/objects this performs shallow replacement/diff semantics.
 
-If you want the old path-argument ergonomics, `storePath` is an opt-in
-compatibility helper:
+### Compatibility path setter
 
 ```ts
-setState(storePath("user", "name", "Alice"));
-```
-
-### Derived stores: `createStore(fn, seed)`
-
-```ts
-const [todos] = createStore(() => api.listTodos(), []);
-const [summary] = createStore(
-  (draft) => {
-    draft.total = todos().length;
-  },
-  { total: 0 }
+setStore(
+  storePath("user", "address", "city", "Paris")
 );
 ```
 
-### `createProjection(fn, seed)`
+Use this mainly for migration compatibility; draft-first is the default 2.0
+shape.
 
-A derived store with reactive reconciliation - the general-purpose version of
-the pattern `createStore(fn)`/`createOptimisticStore` use, for building your
-own derived-with-reconciliation primitives.
+### Derived stores
 
-### Plain values and prop helpers
+Readonly:
 
 ```ts
-const plain = snapshot(store); // was unwrap(store)
-JSON.stringify(plain);
-
-const merged = merge(defaults, overrides); // was mergeProps
-const rest = omit(props, "class", "style"); // was splitProps(props, [...])
+const users = createProjection(
+  async () => api.listUsers(),
+  []
+);
 ```
 
-One behavioral difference in `merge`: `undefined` is a real value that
-overrides, not a signal to "skip this key" - `merge({ a: 1 }, { a: undefined }).a`
-is `undefined`.
+Writable derived store:
 
-### `deep(store)` and `reconcile(value, key)`
+```ts
+const [cache, setCache] = createStore(
+  draft => {
+    draft.value = expensive(selector());
+  },
+  { value: 0 }
+);
+```
 
-`deep(store)` makes a store's observation deep - by default a store only
-tracks the properties actually read, `deep` opts a subtree into tracking all
-nested changes. `reconcile(value, key)` is the diffing function used
-internally by the projection-form primitives to update stores from new data
-by identity; use it directly if you're writing your own reconciliation logic
-against fetched data.
+When a projection derive returns data, the result is reconciled into the
+projection. The default identity key is `"id"`.
 
-### `createMutable` is gone
+### `reconcile`
 
-Use `createStore` with draft setters instead - writes go through `setState`,
-which is what lets them participate in batching and transitions. A raw
-mutable proxy has no such hook.
+```ts
+setStore(s => {
+  reconcile(serverTodos, "id")(s.todos);
+});
+```
+
+- omitted key: default `"id"`;
+- `null`: positional matching.
+
+### `shallow: true`
+
+A specialized record-replacement optimization.
+
+```ts
+const [rows, setRows] = createStore(initialRows, {
+  shallow: true
+});
+```
+
+Below the shallow boundary, records are plain and should be replaced, not
+mutated field-by-field.
+
+This is appropriate when records arrive wholesale and profiling shows deep
+proxying is unnecessary overhead.
+
+### `merge`, `omit`, `snapshot`, `deep`
+
+```ts
+const props2 = merge(defaults, props, overrides);
+const rest = omit(props, "class", "style");
+
+const plain = snapshot(store);
+const deeplyTrackedPlain = deep(store);
+```
+
+`undefined` is a real override value in `merge`.
+
+## Props
+
+Call accessors at the JSX boundary:
+
+```tsx
+<Counter value={count()} />
+```
+
+Read properties in the child:
+
+```tsx
+function Counter(props: { value: number }) {
+  return <span>{props.value}</span>;
+}
+```
+
+Do not destructure reactive props at component top level:
+
+```tsx
+// Bad
+function Counter({ value }: { value: number }) {
+  return <span>{value}</span>;
+}
+```
+
+If an API intentionally forwards a getter, make that explicit in its name/type.
 
 ## Control flow
 
-### Lists: `Index` is gone, `For` covers both keying modes
+### `For`
+
+Default / keyed-by-identity:
 
 ```tsx
-// keyed={false} is the direct Index replacement: item and index are
-// both accessors, and identity is purely positional.
-<For each={items()} keyed={false}>
-  {(item, i) => <Row label={item()} position={i()} />}
-</For>
-
-// Default / keyed={true}: identity-keyed, item is the raw value.
 <For each={items()}>
-  {(item, i) => <Row label={item} position={i()} />}
+  {(item, i) => (
+    <Row item={item} index={i()} />
+  )}
 </For>
 ```
 
-Prefer a literal `keyed` value; a dynamic `keyed={cond()}` makes the callback
-shape ambiguous since the two modes pass different argument types.
+- `item`: plain value;
+- `i`: accessor.
 
-`Show`, `Switch`/`Match`, and `Repeat` also pass accessors into their
-function children so reads stay safe regardless of when the child re-runs:
+Non-keyed:
+
+```tsx
+<For each={items()} keyed={false}>
+  {(item, i) => (
+    <Row item={item()} index={i} />
+  )}
+</For>
+```
+
+- `item`: accessor;
+- `i`: plain number.
+
+Custom key:
+
+```tsx
+<For each={rows} keyed={row => row.id}>
+  {row => <Row row={row()} />}
+</For>
+```
+
+The custom-key form provides a row accessor so same-key replacement can update
+the row without recreating the keyed DOM identity.
+
+### `Repeat`
+
+```tsx
+<Repeat count={store.items.length}>
+  {i => <Row item={store.items[i]} />}
+</Repeat>
+```
+
+`i` is a plain number.
+
+### `Show`
+
+Function-child narrowing receives an accessor:
 
 ```tsx
 <Show when={user()} fallback={<Login />}>
-  {(u) => <Profile user={u()} />}
+  {u => <Profile user={u()} />}
 </Show>
 ```
 
-### `dynamic(source)` factory (replaces `createDynamic`)
+### `Errored`
+
+The error argument is an accessor in the current RC control-flow API:
 
 ```tsx
-import { Dynamic, dynamic } from "@solidjs/web";
-
-// JSX wrapper - unchanged call site, now backed by dynamic() internally.
-<Dynamic component={isEditing() ? Editor : Viewer} value={value()} />;
-
-// Factory form - returns a stable component reference.
-const ActiveView = dynamic(() => (isEditing() ? Editor : Viewer));
-<ActiveView value={value()} />;
+<Errored
+  fallback={(err, reset) => (
+    <button onClick={reset}>
+      retry {String(err())}
+    </button>
+  )}
+>
+  <Page />
+</Errored>
 ```
 
-### `Reveal` (replaces `SuspenseList`)
+Treat the fallback as a render callback, not a component constructor.
 
-Coordinates reveal timing across sibling `Loading` boundaries via an `order`
-prop: `"sequential"` (default - reveal front to back), `"together"` (wait for
-the whole group), or `"natural"` (the group participates as one slot in its
-parent's ordering, then its children reveal independently once released). A
-`collapsed` boolean, meaningful only under `order="sequential"`, keeps later
-fallbacks hidden until their turn.
+### `Reveal`
+
+Coordinates sibling `Loading` boundaries.
 
 ```tsx
-<Reveal>
-  <Loading fallback={<Skeleton />}><Header /></Loading>
-  <Loading fallback={<Skeleton />}><Body /></Loading>
+<Reveal collapsed>
+  <Loading fallback={<Skeleton />}><A /></Loading>
+  <Loading fallback={<Skeleton />}><B /></Loading>
 </Reveal>
 ```
 
-## DOM
-
-- **Attributes are attributes**, generally lowercase, closer to raw HTML -
-  not silently mapped to DOM properties. Booleans are presence/absence
-  (`muted={true}` adds the attribute, `muted={false}` removes it).
-- **`attr:`, `bool:`, and `on:` namespaces are removed** - you don't need
-  them. Keep using camelCase handlers (`onClick`) for Solid-managed events;
-  for native listener options (e.g. `{ capture: true }`), attach via a ref
-  callback instead of `on:`.
-- **`use:` directives are removed.** Replace with `ref` directive factories,
-  which compose via array:
-
-  ```tsx
-  <button ref={[autofocus, tooltip({ content: "Save" })]} />
-  ```
-
-  Prefer the two-phase shape for a directive factory: an owned setup phase
-  (create primitives/subscriptions) and an unowned apply phase (the actual
-  DOM write) returned as a function of the element:
-
-  ```ts
-  function tooltip(config: TooltipConfig) {
-    let el: HTMLElement | undefined;
-    createEffect(
-      () => config.content,
-      (content) => {
-        if (el) el.title = content;
-      }
-    );
-    return (nextEl: HTMLElement) => {
-      el = nextEl;
-    };
-  }
-  ```
-
-- **`classList` is folded into `class`**, which accepts string, array, and
-  object forms combined:
-
-  ```tsx
-  <div class={["card", { active: isActive(), disabled: isDisabled() }]} />
-  ```
-
-- **`/*@once*/` is removed** from the public JSX model - it is not a JSX
-  form of `untrack`. Keep reactive values reactive in JSX; for a DOM
-  element's initial-only state, use the platform's own default prop
-  (`defaultValue` instead of freezing `value`); for a genuine one-time
-  JavaScript read outside JSX, use `untrack(() => ...)` narrowly.
-- **Delegated events are owned by render roots.** `render()`/`hydrate()`
-  install and clean up delegated listeners on their own root container.
-  `Portal` registers its outside-root mount point with the owning root so
-  events still bubble through the logical Solid tree. If old code called
-  `clearDelegatedEvents()`, drop it - disposing the render root replaces it.
+Orders include `"sequential"`, `"together"`, and `"natural"`.
 
 ## Context
 
-The context itself is the provider - `Context.Provider` is gone:
+Default-less context:
 
 ```tsx
-const Theme = createContext("light");
-<Theme value="dark">{props.children}</Theme>;
+const Session = createContext<SessionState>();
+
+<Session value={session}>
+  <Page />
+</Session>;
+
+const session = useContext(Session);
 ```
 
-A **default-less** context (`createContext<T>()`, no argument) is typed
-`Context<T>`, not `Context<T | undefined>` - `useContext` returns `T`
-directly and throws `ContextNotFoundError` at runtime if nothing provided
-it. This removes the old `useX`-with-throw wrapper hook pattern entirely;
-call `useContext` directly:
+No provider -> `ContextNotFoundError`. `useContext` is typed as the concrete
+value, so the common 1.x/React wrapper that checks for `undefined` is not
+needed.
+
+Context with a default remains useful for primitive fallback values such as
+theme or locale.
+
+Intentional app-global signal/store at module scope is valid. Be careful with
+SSR/request isolation and unmanaged resources.
+
+## DOM
 
 ```ts
-const TodosContext = createContext<TodosApi>();
-// useContext(TodosContext) is TodosApi, throws if no <TodosContext> ancestor.
+const dispose = render(
+  () => <App />,
+  document.getElementById("root")!
+);
+
+hydrate(
+  () => <App />,
+  document.getElementById("root")!
+);
 ```
 
-A context created **with** a default (`createContext(defaultValue)`) is
-unchanged - `useContext` falls back to it outside any provider. Reserve the
-default form for genuinely static, ownerless values (theme, locale, frozen
-config); reactive payloads (signals, stores, `[state, actions]` tuples)
-generally can't have a sensible default because they need an owner to be
-constructed, so use the default-less throwing form for those.
+Dynamic factory:
 
-Prefer plain props until drilling is genuinely deep or fans out to several
-unrelated branches (roughly 3+ hops as a rule of thumb) - Context has real
-cost (an extra indirection, a provider you must remember to mount) and
-isn't the default anti-prop-drilling tool the way it is in React. Do not use
-a module-level singleton as an alternative to Context for shared app state:
-module scope has no disposal and, in an SSR app, is shared across concurrent
-requests.
+```ts
+const Active = dynamic(
+  () => editing() ? Editor : Viewer
+);
+```
+
+Wrapper form:
+
+```tsx
+<Dynamic
+  component={editing() ? Editor : Viewer}
+  value={value()}
+/>
+```
+
+Class array/object forms:
+
+```tsx
+<div
+  class={[
+    "card",
+    props.class,
+    {
+      active: active(),
+      invalid: !valid()
+    }
+  ]}
+/>
+```
+
+## SSR/hydration options
+
+Async-aware computes can use `ssrSource` policy.
+
+Conceptually:
+
+- `"server"`: serialized server answer is authoritative for initial hydration;
+- `"hybrid"`: seed from server, then compute on client;
+- `"client"`: client-owned compute, with structural or declared first paint.
+
+Other advanced options include:
+
+- `deferStream: true` for server stream policy where supported;
+- `transparent: true` for hydration integration nodes that must not consume a
+  normal hydration id slot.
+
+These are integration-tier features. Verify current source before generating
+framework-level hydration code.
+
+## Diagnostic/programmatic dev access
+
+```ts
+import { DEV } from "solid-js";
+
+const off = DEV?.diagnostics.subscribe(event => {
+  console.log(
+    event.code,
+    event.severity,
+    event.message
+  );
+});
+
+const capture = DEV?.diagnostics.capture();
+
+// code under test
+
+const events = capture?.stop() ?? [];
+off?.();
+```
+
+`DEV` is development-only from the public `solid-js` entry.
+
+See `dev-diagnostics.md` for the current code union and behavior.
+
+## Upstream baseline
+
+Primary snapshot sources:
+
+- `packages/solid/CHEATSHEET.md`
+- `documentation/solid-2.0/01-reactivity-batching-effects.md`
+- `documentation/solid-2.0/03-async.md`
+- `documentation/solid-2.0/04-stores.md`
+- `packages/solid-signals/src/signals.ts`
+- `packages/solid-signals/src/core/*.ts`
