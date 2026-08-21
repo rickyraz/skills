@@ -1,394 +1,618 @@
-# SolidJS 2.0 anti-patterns
+# SolidJS 2.0 RC anti-patterns
 
-Recurring mistakes models make when writing Solid 2.0 code, each caused by a
-React or Solid-1.x reflex firing instead of the 2.0 idiom. Each entry gives
-the wrong version, the fix, and *why* the wrong version feels natural - the
-reasoning is what lets the correction generalize instead of only fixing one
-line.
+Snapshot baseline: **`solid-js@2.0.0-rc.1`**, branch `next`, verified
+2026-08-21.
 
-**Contents:** [1. Accessor passed as prop](#1-passing-an-accessor-as-a-prop-instead-of-calling-it-at-the-call-site) ·
-[2. Manual class strings](#2-manual-class-string-building-instead-of-class--) ·
-[3. Controlled inputs](#3-uncontrolled-inputs-written-as-controlled) ·
-[4. Flat hook returns](#4-flat-object-return-from-a-custom-hook-instead-of-state-actions) ·
-[5. Mixed accessor/property reads](#5-mixing-accessor-calls-and-property-reads-in-one-state-object) ·
-[6. Parallel stores](#6-several-parallel-stores-instead-of-one-derived-pipeline) ·
-[7. Wide Loading boundary](#7-loading-boundary-scoped-around-a-whole-shell-instead-of-the-suspending-part) ·
-[8. Per-item mutation loops](#8-looping-one-mutation-per-item-instead-of-a-bulk-endpoint) ·
-[9. Imperative splice](#9-imperative-splice-loops-instead-of-a-returned-filter) ·
-[10. Premature Context](#10-reaching-for-context-plus-a-throw-wrapper-hook-before-its-earned) ·
-[11. PascalCase callbacks](#11-pascalcasing-a-render-callback-like-its-a-component) ·
-[12. Restated defaults](#12-restating-an-option-that-already-matches-the-default) ·
-[13. Module-scope primitives](#13-reactive-primitives-created-at-module-scope) ·
-[14. onCleanup vs onSettled](#14-oncleanup-for-ordinary-setupteardown-instead-of-onsettled)
+This file intentionally separates **runtime/API-backed mistakes** from
+**project conventions**. Do not present an opinionated convention as though
+Solid itself rejects other designs.
 
-## 1. Passing an accessor as a prop instead of calling it at the call site
+# Runtime/API-backed mistakes
+
+## 1. Passing a signal accessor where a normal prop value is expected
 
 ```tsx
-// Bug: the function itself is handed down as `filter`.
-function ArticleList(props: { filter: () => string }) {
-  return <span>{props.filter()}</span>; // double indirection
-}
-<ArticleList filter={activeFilter} />;
+// Bad: child receives a function.
+<Counter value={count} />
 
-// Fix: call the accessor at the JSX boundary; the child receives a value.
-function ArticleList(props: { filter: string }) {
-  return <span>{props.filter}</span>;
+function Counter(props: { value: () => number }) {
+  return <span>{props.value()}</span>;
 }
-<ArticleList filter={activeFilter()} />;
 ```
 
-**Why:** props are reactive *values* read through a proxy - `props.filter`
-already re-reads on every access, the same way `filter()` would. Passing the
-function instead of its value is the single most common Solid bug pattern,
-and it's not new to 2.0: it has been wrong since 1.x. It resurfaces
-constantly because "pass a function so the child can read the latest value
-lazily" is exactly the right instinct in a callback-based system, and Solid's
-props already give you that for free without a function wrapper.
-
-## 2. Manual class string building instead of `class={[...]}`
+Prefer:
 
 ```tsx
-// Bug
-const className = () => {
-  const parts = ["card"];
-  if (isActive()) parts.push("active");
-  if (isDisabled()) parts.push("disabled");
-  return parts.join(" ");
-};
-<div class={className()} />;
+<Counter value={count()} />
 
-// Fix
-<div class={["card", { active: isActive(), disabled: isDisabled() }]} />;
+function Counter(props: { value: number }) {
+  return <span>{props.value}</span>;
+}
 ```
 
-**Why:** the `classnames`/template-literal habit from React is deeply
-trained. `class` in Solid 2.0 accepts array and object forms directly -
-array entries are always-on, object entries toggle by truthiness - so there
-is never a reason to hand-build the string.
+Props are already reactive at property access. Only forward a getter when the
+component API intentionally asks for one.
 
-## 3. Uncontrolled inputs written as controlled
+## 2. Destructuring or capturing reactive props at component top level
 
 ```tsx
-// Bug: signal + value + onInput, purely to read the value once on submit.
-const [text, setText] = createSignal("");
-<input value={text()} onInput={(e) => setText(e.currentTarget.value)}
-  onKeyDown={(e) => e.key === "Enter" && submit(text())} />;
-
-// Fix: read the DOM directly when you need it; no signal required.
-<input onKeyDown={(e) => {
-  if (e.key !== "Enter") return;
-  submit(e.currentTarget.value);
-  e.currentTarget.value = "";
-}} />;
-```
-
-**Why:** React makes uncontrolled inputs awkward, so controlled `value` +
-`onChange` pairs dominate training data and get reached for reflexively.
-Solid's JSX doesn't reconcile DOM state against a virtual tree, so the DOM
-element can simply hold its own value - only wrap it in a signal when
-something *outside* the input needs to read or clear it.
-
-## 4. Flat object return from a custom hook instead of `[state, actions]`
-
-```ts
-// Bug: mirrors React's `useThing()` object-return convention.
-function useCart() {
-  return { get items() { return data.items; }, addItem, removeItem };
+// Bad: one-time untracked capture.
+function Counter(props: { value: number }) {
+  const value = props.value;
+  return <span>{value}</span>;
 }
-const cart = useCart();
-cart.items; // reactive read
-cart.addItem(x); // action
+```
 
-// Fix: mirror Solid's own primitive shape - a tuple of (state, actions).
-function useCart() {
-  const state = { get items() { return data.items; } };
-  const actions = { addItem, removeItem };
-  return [state, actions] as const;
+```tsx
+// Bad for the same reason.
+function Counter({ value }: { value: number }) {
+  return <span>{value}</span>;
 }
-const [cart, { addItem, removeItem }] = useCart();
 ```
 
-**Why:** `createSignal` returns `[read, write]`, `createStore` returns
-`[store, setter]` - Solid's whole convention is "tuple of (read, write)" so
-custom hooks composing several reads and writers should mirror it. The
-tuple shape also makes the destructuring rule visible at the call site:
-never destructure `state` (reads must stay bound to the proxy/getter),
-always safe to destructure `actions` (stable callbacks).
+Prefer:
 
-## 5. Mixing accessor calls and property reads in one state object
-
-```ts
-// Bug: consumer has to remember which key is call-this vs read-this.
-const state = {
-  get items() { return data.items; }, // property read
-  status, // signal accessor - must be called: state.status()
-};
-
-// Fix: expose every reactive read as a property read.
-const state = {
-  get items() { return data.items; },
-  get status() { return status(); },
-};
+```tsx
+function Counter(props: { value: number }) {
+  return <span>{props.value}</span>;
+}
 ```
 
-**Why:** a signal's "call it to read it" convention is correct *inside* the
-module that owns the signal, but leaks as an inconsistent API once it's
-bundled into a hook's return surface alongside store properties. Wrapping
-the signal in a getter gives every consumer one uniform read shape.
+A normal top-level reactive capture emits `STRICT_READ_UNTRACKED`. If that
+untracked read encounters a still-pending async value, dev throws
+`PENDING_ASYNC_UNTRACKED_READ`.
 
-## 6. Several parallel stores instead of one derived pipeline
+Use `untrack` only when the snapshot is deliberate.
+
+## 3. Treating component ownership as dependency tracking
+
+Bad mental model:
+
+```text
+inside component => tracked
+```
+
+Better:
+
+```text
+component body             => owned
+JSX / memo / effect compute => tracked
+```
+
+`getOwner()` and `getObserver()` are distinct runtime concepts.
+
+## 4. One-argument `createEffect`
 
 ```ts
-// Bug: three independently-written sources kept in sync by hand.
-const [data] = createOptimisticStore(() => api.listItems(), []);
-const [meta, setMeta] = createStore<Record<string, { saving?: boolean; error?: string }>>({});
-// every action now has to write to `data` *and* `meta`, and keep them aligned
-
-// Fix: one derived source; side channels are plain (non-reactive) objects
-// applied inside the projection function, not stored as reactive state.
-const errors: Record<string, string> = {}; // plain JS, not a signal/store
-
-const [items, setItems] = createOptimisticStore<Item[]>(
-  async () => {
-    const rows = await api.listItems();
-    applyErrors(rows, errors); // paint error state onto rows here
-    return rows;
-  },
-  [],
-  { key: "id" }
-);
-
-const save = action(function* (item: Item) {
-  setItems((list) => { /* optimistic write */ });
-  try {
-    yield api.save(item);
-    delete errors[item.id];
-  } catch {
-    errors[item.id] = "save failed";
-  }
-  refresh(items); // re-runs the projection, which re-applies `errors`
+// Bad 1.x shape.
+createEffect(() => {
+  console.log(count());
 });
 ```
 
-**Why:** this is the highest-impact pattern in this list. Redux/React
-training data is dominated by reducers that write each kind of state (data,
-loading, error) into its own flat slice. Solid 2.0's derived-store form
-exists specifically so you can compose "server data + side-channel
-overlays" inside one projection function - the side channel doesn't need to
-be reactive at all, since mutating it and calling `refresh()` is the trigger.
-Reaching for "N pieces of state, N stores" instead of one pipeline is the
-default failure mode; treat one derived store with a composing projection as
-the starting design, not an optimization.
+In current 2.0 dev mode this emits `MISSING_EFFECT_FN`.
 
-## 7. `Loading` boundary scoped around a whole shell instead of the suspending part
+Use split effects:
+
+```ts
+createEffect(
+  () => count(),
+  value => {
+    console.log(value);
+  }
+);
+```
+
+For derived values, use `createMemo`. For a one-shot imperative call, call the
+function directly.
+
+## 5. Putting side effects or writes in effect compute
+
+```ts
+// Bad: compute is for dependency collection / derivation.
+createEffect(
+  () => {
+    setLastSeen(count());
+    return count();
+  },
+  value => log(value)
+);
+```
+
+Writes in ordinary owned computation are guarded by
+`REACTIVE_WRITE_IN_OWNED_SCOPE`.
+
+Move writes to the apply phase or another imperative boundary:
+
+```ts
+createEffect(
+  () => count(),
+  value => {
+    setLastSeen(value);
+    log(value);
+  }
+);
+```
+
+## 6. Reading a store proxy for the first time in effect apply
+
+```ts
+// Bad: user.name and user.age are read in untracked apply.
+createEffect(
+  () => store.user,
+  user => send(user.name, user.age)
+);
+```
+
+Read the fields in compute:
+
+```ts
+createEffect(
+  () => ({
+    name: store.user.name,
+    age: store.user.age
+  }),
+  value => send(value.name, value.age)
+);
+```
+
+For deep subscription, use `deep(store)` in compute.
+
+## 7. Invoking an action from component/computation setup
+
+```ts
+// Bad
+const result = saveAction();
+```
+
+when executed synchronously inside an ordinary owned component/computation
+scope.
+
+Current dev mode emits `ACTION_CALLED_IN_OWNED_SCOPE`.
+
+Call actions from imperative scopes such as event handlers.
+
+## 8. Assuming plain `await` preserves action transaction semantics for later writes
+
+```ts
+const save = action(async function* () {
+  const result = await api.save();
+
+  // Bad assumption: this write is automatically back inside the transaction.
+  setState(s => {
+    s.result = result;
+  });
+});
+```
+
+Use the transaction-aware suspension/resumption point:
+
+```ts
+const save = action(async function* () {
+  const result = await api.save();
+
+  yield;
+
+  setState(s => {
+    s.result = result;
+  });
+});
+```
+
+Use `yield` before writes that occur after an internal `await` when you need
+those writes to re-enter the action transaction.
+
+## 9. Calling `flush()` inside an action
+
+An action is already managing transactional flush/settle behavior. A manual
+flush can expose a partially completed step.
+
+Do not do it.
+
+## 10. Treating `Loading` as "source is fetching"
+
+Bad model:
+
+```text
+request in flight => Loading fallback
+```
+
+Current model:
+
+```text
+branch has no ready answer yet
+  => Loading may show fallback
+
+branch has rendered before + normal revalidation
+  => keep stale content
+
+Loading on={key} + key changed + pending
+  => boundary may re-show fallback
+```
+
+Therefore avoid wrapping an entire stable shell unless the whole shell truly
+has one readiness boundary.
 
 ```tsx
-// Bug: fallback re-states the same chrome that the resolved content has,
-// so a revalidation tears down and rebuilds the header, nav, everything.
-<Loading fallback={<AppShell><p>Loading…</p></AppShell>}>
-  <AppShell><Dashboard /></AppShell>
-</Loading>
-
-// Fix: only the part that actually reads async data sits inside the boundary.
 <AppShell>
-  <Loading fallback={<p>Loading…</p>}>
-    <Dashboard />
+  <Loading fallback={<ProfileSkeleton />}>
+    <Profile />
   </Loading>
 </AppShell>
 ```
 
-**Why:** React suspense boundaries are cheap to wrap widely because the
-reconciler diffs virtual nodes - the "duplication" between fallback and
-content is amortized away. Solid's JSX builds real DOM: the fallback subtree
-is actually constructed, and actually torn down and replaced on transition.
-There's no diff to hide the cost, so the right reflex is the opposite of
-React's: scope `Loading` as tightly as possible around the suspending read,
-and keep everything else outside so it mounts once and stays put.
-
-## 8. Looping one mutation per item instead of a bulk endpoint
+## 11. Asking `isPending` about the wrong expression
 
 ```ts
-// Bug: N network round-trips disguised as one action.
-const archiveAll = action(function* (ids: string[]) {
-  for (const id of ids) yield api.archive(id);
-  refresh(items);
-});
+const user = createMemo(() => fetchUser(id()));
 
-// Fix: one round trip; fan a bulk failure back out to per-item state if needed.
-const archiveAll = action(function* (ids: string[]) {
-  try {
-    yield api.archiveMany(ids);
-  } catch {
-    ids.forEach((id) => (errors[id] = "archive failed"));
+// Usually not what you mean:
+isPending(id);
+```
+
+`id` itself is not the lower async computation.
+
+Read the async value:
+
+```ts
+isPending(() => user());
+```
+
+`isPending` actively performs the expression's read, so place it under the
+boundary that owns initial readiness if that read can itself be not ready.
+
+## 12. Expecting a bare `refresh()` to behave like old `resource.loading`
+
+```ts
+refresh(user);
+```
+
+A same-question refresh is intentionally quiet. Existing data can continue to
+answer the question while the fresh result arrives.
+
+If the reload itself should count as pending:
+
+```ts
+affects(user);
+refresh(user);
+```
+
+## 13. Using `loadingValue` as disguised fake data
+
+Bad:
+
+```ts
+createMemo(
+  () => fetchAccount(),
+  {
+    loadingValue: {
+      name: "Real Customer",
+      balance: 999999
+    }
   }
-  refresh(items);
+);
+```
+
+`loadingValue` is a committed first value, not a fallback tree and not an
+excuse to impersonate a server answer.
+
+Use a clearly provisional value:
+
+```ts
+createMemo(
+  () => fetchAccount(),
+  {
+    loadingValue: {
+      provisional: true,
+      name: "",
+      balance: 0
+    }
+  }
+);
+```
+
+or use `<Loading>`.
+
+## 14. Creating nested primitives inside `createTrackedEffect` or owner-backed `onSettled`
+
+```ts
+// Bad
+onSettled(() => {
+  const [value, setValue] = createSignal(0);
 });
 ```
 
-**Why:** it's easy to extend a working per-item action with a loop because
-the shape is already there, but a real backend rarely exposes an N-request
-bulk operation and the example code shouldn't pretend it does. One `yield`
-per network round trip is the rule of thumb.
+These are restricted leaf scopes. Current dev mode emits
+`PRIMITIVE_IN_FORBIDDEN_SCOPE`.
 
-## 9. Imperative splice loops instead of a returned `filter`
+Create the primitive in the parent owner:
 
 ```ts
-// Bug: index-hunting and splicing inside the draft.
-setItems((draft) => {
-  const i = draft.findIndex((x) => x.id === targetId);
-  if (i >= 0) draft.splice(i, 1);
-});
+const [value, setValue] = createSignal(0);
 
-// Fix: return a filtered array from the setter.
-setItems((draft) => draft.filter((item) => item.id !== targetId));
+onSettled(() => {
+  console.log(value());
+});
 ```
 
-**Why:** a draft setter can mutate *or* return a value for shallow
-replacement - for arrays, the return path replaces by index and adjusts
-length, so surviving object references keep their identity. That makes
-`filter`/`map`-style returns both correct and far less error-prone than
-manual index arithmetic. This is positional replacement, not keyed
-reconciliation - the keyed diffing behavior belongs to the projection-function
-form (`createStore(fn, seed, { key })`), not to a plain setter's return path.
-
-## 10. Reaching for Context (plus a throw-wrapper hook) before it's earned
+## 15. Calling `onCleanup` inside those restricted leaf scopes
 
 ```ts
-// Bug: two hops of prop drilling "solved" with Context and a React-style
-// non-null wrapper hook.
-const CartContext = createContext<CartApi>();
-const useCart = () => {
-  const ctx = useContext(CartContext);
-  if (!ctx) throw new Error("missing CartContext");
-  return ctx;
-};
+// Bad
+onSettled(() => {
+  onCleanup(() => teardown());
+});
+```
 
-// Fix: for shallow drilling, just pass props.
-function App() {
-  const cart = createCart();
-  return <Header cart={cart} />;
+Dev emits `CLEANUP_IN_FORBIDDEN_SCOPE`.
+
+Return cleanup directly:
+
+```ts
+onSettled(() => {
+  const resource = setup();
+  return () => resource.dispose();
+});
+```
+
+## 16. Returning cleanup from an unowned/out-of-band `onSettled`
+
+An `onSettled` scheduled without an owner cannot attach a returned cleanup to a
+lifecycle.
+
+Current dev mode emits `SETTLED_CLEANUP_UNOWNED`.
+
+If the work owns a resource, schedule it from an owned component/custom
+primitive or explicitly design its disposal.
+
+## 17. Calling `flush()` from effect callbacks as though it always forces another drain
+
+Inside a normal effect apply callback, current dev mode emits
+`FLUSH_IN_EFFECT_CALLBACK`; the call is a no-op because the effect is already
+running inside a flush.
+
+Inside `createTrackedEffect` / owner-backed `onSettled`, a re-entrant
+`flush()` currently throws without a stable diagnostic code.
+
+If work truly must drain later:
+
+```ts
+queueMicrotask(() => flush());
+```
+
+But needing this routinely is usually a design smell.
+
+## 18. Using `sync: true` and returning async work
+
+```ts
+createMemo(
+  () => fetchUser(),
+  { sync: true }
+);
+```
+
+`sync: true` asserts that the computation is synchronous. Returning a Promise
+or AsyncIterable emits `SYNC_NODE_RECEIVED_ASYNC` in dev.
+
+Remove `sync: true` for normal async-aware behavior.
+
+## 19. Creating effects without a lifecycle owner
+
+```ts
+// Suspicious at module scope.
+createEffect(
+  () => count(),
+  value => console.log(value)
+);
+```
+
+Current dev mode warns with `NO_OWNER_EFFECT`.
+
+This is different from an intentionally global signal/store. The problem is
+the effect's disposal lifecycle.
+
+## 20. Treating every module-scope signal/store as invalid
+
+This is the inverse mistake.
+
+```ts
+// Can be valid when process-global state is intentional.
+export const [theme, setTheme] = createSignal("dark");
+```
+
+Solid's current guidance explicitly permits module-scope state as app-global
+state.
+
+Ask instead:
+
+- should the state be shared for the process lifetime?
+- under SSR, must it be request/user isolated?
+- does the module also create listeners/effects/resources that need cleanup?
+
+A request-specific auth/session store at module scope in SSR is dangerous.
+A static app-wide theme preference may be intentional.
+
+## 21. Re-implementing a default-less context missing-provider wrapper
+
+```ts
+const Session = createContext<SessionState>();
+
+// Redundant 1.x/React-style wrapper.
+function useSession() {
+  const value = useContext(Session);
+  if (!value) throw new Error("missing Session");
+  return value;
 }
 ```
 
-**Why:** "shared state means Context" is a strong React reflex, but Solid's
-Context has a real cost and prop drilling two or three levels is usually
-more direct to read. When a context genuinely does have several fanned-out
-consumers at mixed depth, reach for Context - but a default-less
-`createContext<T>()` already throws on a missing provider at runtime (see
-`references/api-cheatsheet.md#context`), so the manual wrapper-hook pattern
-should be deleted outright rather than reproduced: call `useContext`
-directly. Never substitute a module-level singleton for Context as a way to
-avoid prop drilling - it has no disposal and leaks across requests under SSR.
+In the current 2.0 type/runtime model, default-less `useContext(Session)`
+already returns `SessionState` and throws when no provider exists.
 
-## 11. PascalCasing a render callback like it's a component
+Use it directly.
+
+## 22. Getting `<For keyed={false}>` callback arguments wrong
+
+Bad:
 
 ```tsx
-// Bug: named and cased like a component, but it isn't mountable as one -
-// `Errored` calls it directly with (err, reset), not with a props object.
-function ErrorFallback(err: unknown, reset: () => void) {
-  return <button onClick={reset}>Retry: {String(err)}</button>;
-}
-<Errored fallback={ErrorFallback}>{/* ... */}</Errored>;
-
-// Fix: camelCase signals "callback, not component".
-const renderError = (err: unknown, reset: () => void) => (
-  <button onClick={reset}>Retry: {String(err)}</button>
-);
-<Errored fallback={renderError}>{/* ... */}</Errored>;
+<For each={items()} keyed={false}>
+  {(item, i) => (
+    <Row item={item()} index={i()} />
+  )}
+</For>
 ```
 
-**Why:** in React, anything PascalCase returning JSX is a Component by
-convention. Solid's JSX hosts two incompatible call shapes on the same
-surface: actual components (`(props) => Element`, mounted via `<X />`) and
-render callbacks passed to control-flow primitives (`Show`, `For`,
-`Errored`, `Repeat`, `Switch`/`Match`), which the parent invokes directly
-with positional arguments. PascalCasing a callback misleads the reader into
-thinking it's mountable as `<X />`, which it isn't.
+`i` is not an accessor in non-keyed mode.
 
-## 12. Restating an option that already matches the default
+Correct:
+
+```tsx
+<For each={items()} keyed={false}>
+  {(item, i) => (
+    <Row item={item()} index={i} />
+  )}
+</For>
+```
+
+Remember:
+
+```text
+default/keyed:
+  item = plain value
+  i    = accessor
+
+keyed={false}:
+  item = accessor
+  i    = plain number
+
+Repeat:
+  i    = plain number
+```
+
+## 23. Treating `Errored`'s error argument as a plain error
+
+Bad:
+
+```tsx
+<Errored
+  fallback={(err, reset) => (
+    <button onClick={reset}>
+      {String(err)}
+    </button>
+  )}
+>
+```
+
+Current RC control flow passes an error accessor.
+
+Correct:
+
+```tsx
+<Errored
+  fallback={(err, reset) => (
+    <button onClick={reset}>
+      {String(err())}
+    </button>
+  )}
+>
+```
+
+Also treat this `fallback` as a render callback, not a component constructor.
+
+## 24. Passing invalid `affects()` targets
+
+Bad:
 
 ```ts
-// Bug: adds noise, and implies `key: "id"` is a choice the caller must make.
-const [items] = createOptimisticStore(() => api.list(), [], { key: "id" });
-
-// Fix: omit it - "id" is already the default identity field.
-const [items] = createOptimisticStore(() => api.list(), []);
+affects(() => user());
+affects(user());
 ```
 
-**Why:** writing every option "to be safe" is a reasonable defensive habit
-in general, but in Solid's projection-based primitives the default
-(`options.key === "id"`) is a deliberate convention, not an implementation
-detail to hedge against. Showing the call with no options communicates "this
-data has an `id`, so it just works"; restating the default communicates the
-opposite. Only pass `key` when the identity field genuinely isn't `id`.
+`affects` expects the original source accessor or a store node.
 
-## 13. Reactive primitives created at module scope
+Use:
 
 ```ts
-// Bug: works, but the signal and its listener live for the process lifetime.
-export const [theme, setTheme] = createSignal(getInitialTheme());
-window.addEventListener("storage", () => setTheme(getInitialTheme()));
-
-// Fix: wrap it in a custom primitive owned by the component that uses it.
-export function createThemeSignal() {
-  const [theme, setTheme] = createSignal(getInitialTheme());
-  onSettled(() => {
-    const onStorage = () => setTheme(getInitialTheme());
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  });
-  return theme;
-}
+affects(user);
+affects(store);
+affects(store.user, "name");
 ```
 
-**Why:** `window.addEventListener` at module scope is ordinary JS muscle
-memory, and "app-wide state lives in a module singleton" is an ordinary
-React reflex too - nothing in Solid's API stops you from calling
-`createSignal` at the top of a file. But a module-scope signal has no owner:
-under SSR it becomes one instance shared by every concurrent request, and
-any attached listener never gets cleaned up. Put reactive primitives (and
-anything that needs cleanup) inside a component or a custom primitive
-function that something else calls with an owner in scope.
+Invalid shapes emit `INVALID_AFFECTS_TARGET`.
 
-## 14. `onCleanup` for ordinary setup/teardown instead of `onSettled`
+## 25. Inventing dev diagnostic identifiers
 
-```ts
-// Bug: works, but is the 1.x idiom for something 2.0 has a direct primitive for.
-function createResizeSignal() {
-  const [size, setSize] = createSignal(measure());
-  const onResize = () => setSize(measure());
-  window.addEventListener("resize", onResize);
-  onCleanup(() => window.removeEventListener("resize", onResize));
-  return size;
-}
+The current runtime publishes a typed `DiagnosticCode` union.
 
-// Fix: co-locate setup and teardown inside onSettled's returned cleanup.
-function createResizeSignal() {
-  const [size, setSize] = createSignal(measure());
-  onSettled(() => {
-    const onResize = () => setSize(measure());
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  });
-  return size;
-}
-```
+Do not convert an uncoded dev throw into a made-up symbolic code.
 
-**Why:** `useEffect(fn, [])` returning a cleanup is one of the most heavily
-trained shapes for "on mount, do X, undo X on unmount" - `onSettled` is the
-direct 2.0 analogue and is meant to be reached for by default, with
-`onCleanup` demoted to an advanced primitive for reactive cleanup inside a
-custom computation. Note also that `onCleanup` cannot even be called from
-inside `onSettled` (it throws in dev) - the returned-function form is not
-optional stylistic preference, it's the only supported shape there.
+Examples of uncoded conditions in the current source include:
 
----
+- invalid cleanup return from an effect/tracked-effect callback;
+- re-entrant `flush()` throw inside `createTrackedEffect` / owner-backed
+  `onSettled`.
 
-**A closing note on framing, not just code:** when asked to describe or
-review Solid 2.0 code rather than write it, resist the instinct to produce a
-syntax diff against React or Solid 1.x ("uses `class` not `className`, no
-`key` prop, signals are called as functions…"). That inventory is true but
-shallow. Ask instead what the code's structure accomplishes - e.g. how few
-moving parts a layered-projection store needs compared to hand-synchronized
-state - since that's usually the point of showing 2.0 code in the first
-place, not the surface syntax.
+Quote the actual message or describe the condition unless the source exposes a
+stable code.
+
+# Project conventions — not Solid rules
+
+The following may be good architecture choices, but do **not** label them as
+framework errors.
+
+## Tuple `[state, actions]` return shape
+
+A custom primitive may use `[state, actions]` because it communicates read/write
+roles clearly. A flat object is not inherently invalid Solid code.
+
+Use the tuple form as a project convention when it improves consistency.
+
+## One derived pipeline instead of several stores
+
+Combining server data and overlays in a derived/optimistic store can reduce
+manual synchronization. Multiple stores are not automatically a bug.
+
+Choose based on whether state has one lifecycle/identity model or genuinely
+independent concerns.
+
+## Prop drilling vs Context
+
+There is no official "two hops", "three hops", or other threshold.
+
+Use props when explicit local data flow is clearer. Use Context when the state
+is naturally scoped to a subtree with distributed consumers.
+
+## Controlled vs uncontrolled inputs
+
+Both are valid. Avoid creating reactive state only because React muscle memory
+tells you every field must be controlled, but use a signal when other reactive
+consumers genuinely need the value.
+
+## Class arrays/objects vs manual strings
+
+`class={[...]}` / object forms are excellent 2.0 ergonomics, but a computed
+class string is not a runtime violation. Prefer the native structured form
+when it is simpler.
+
+## Bulk API calls
+
+Prefer a real backend bulk endpoint when one exists. Do not invent
+`api.archiveMany()` merely to satisfy a frontend "anti-pattern" rule.
+
+This is an API architecture concern, not a Solid semantic requirement.
+
+# Review heuristic
+
+When reviewing suspicious code, ask in this order:
+
+1. Where is the reactive read?
+2. Is that location tracked?
+3. Is a write/action happening inside ordinary owned computation?
+4. Can this async read be not ready, and who owns that readiness?
+5. Is `Loading` initial branch readiness or intentionally re-armed?
+6. Does `isPending` read the async source itself?
+7. Who owns cleanup?
+8. Is a callback a component, a render callback, or an effect apply phase?
+9. What exact dev diagnostic does current source emit?
+
+Prefer evidence from current dev mode over intuition.
